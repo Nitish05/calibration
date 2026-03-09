@@ -30,6 +30,9 @@ parser.add_argument("--format", choices=["csv", "json"], default="csv")
 parser.add_argument("--continuous", action="store_true", help="Live preview; press 's' to save or wait for Ctrl+C")
 parser.add_argument("--epsilon", type=float, default=2.0, help="approxPolyDP epsilon (px)")
 parser.add_argument("--min-area", type=int, default=50000, help="Minimum contour area (px^2) to consider")
+parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
+                    default=[130, 100, 870, 620],
+                    help="Region of interest (x y w h) in pixels — only segment inside this box")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -57,9 +60,21 @@ if args.headless:
 # ---------------------------------------------------------------------------
 # Segmentation helpers
 # ---------------------------------------------------------------------------
-def segment_racket(frame: np.ndarray, min_area: int, epsilon: float):
-    """Return the simplified outer contour of the racket, or None."""
+def segment_racket(frame: np.ndarray, min_area: int, epsilon: float, roi=None):
+    """Return the simplified outer contour of the racket, or None.
+
+    roi: (x, y, w, h) — if provided, only search inside this region.
+         Returned contour coordinates are in full-frame space.
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+    # Crop to ROI for segmentation
+    ox, oy = 0, 0
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        gray = gray[ry:ry + rh, rx:rx + rw]
+        ox, oy = rx, ry
+
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
     # Adaptive threshold — dark racket on lighter board becomes white foreground
@@ -89,6 +104,12 @@ def segment_racket(frame: np.ndarray, min_area: int, epsilon: float):
 
     # Simplify for smooth gantry-friendly output
     simplified = cv2.approxPolyDP(largest, epsilon, closed=True)
+
+    # Offset contour back to full-frame coordinates
+    if roi is not None:
+        simplified[:, :, 0] += ox
+        simplified[:, :, 1] += oy
+
     return simplified
 
 
@@ -106,8 +127,13 @@ def detect_tag(gray: np.ndarray):
     return det.pose_R, det.pose_t
 
 
-def draw_overlay(frame, contour, R, t, world_pts):
+def draw_overlay(frame, contour, R, t, world_pts, roi=None):
     """Draw contour, tag axes, and status text on the frame."""
+    # ROI box in yellow dashed (draw as thin rectangle)
+    if roi is not None:
+        rx, ry, rw, rh = roi
+        cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), (0, 200, 200), 1)
+
     # Contour in cyan
     if contour is not None:
         cv2.drawContours(frame, [contour], -1, (255, 255, 0), 2)
@@ -163,7 +189,8 @@ def save_output(world_pts: np.ndarray, fmt: str, filename: str):
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
-print(f"Racket segmentation | epsilon={args.epsilon} | min_area={args.min_area}")
+roi = tuple(args.roi)
+print(f"Racket segmentation | epsilon={args.epsilon} | min_area={args.min_area} | roi={roi}")
 print(f"Output: {args.output}.{args.format}")
 if args.continuous:
     save_key = "'s' to save" if not args.headless else "Ctrl+C to save last"
@@ -182,7 +209,7 @@ try:
             break
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        contour = segment_racket(frame, args.min_area, args.epsilon)
+        contour = segment_racket(frame, args.min_area, args.epsilon, roi=roi)
         R, t = detect_tag(gray)
 
         world_pts = None
@@ -192,7 +219,7 @@ try:
             world_pts = pixels_to_world(pixels, R, t)
             last_world_pts = world_pts
 
-        draw_overlay(frame, contour, R, t, world_pts)
+        draw_overlay(frame, contour, R, t, world_pts, roi=roi)
 
         if args.headless:
             stream.update_frame(frame)
