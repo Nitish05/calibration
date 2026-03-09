@@ -27,7 +27,7 @@ from scipy.spatial.distance import cdist
 
 from camera import Camera
 from stream import StreamServer
-from transforms import FX, FY, CX, CY, TAG_SIZE, CAMERA_MATRIX, pixels_to_world
+from transforms import FX, FY, CX, CY, TAG_SIZE, CAMERA_MATRIX, pixels_to_world, world_to_pixels
 
 # ---------------------------------------------------------------------------
 # Interactive HTML with draggable ROI overlay
@@ -52,6 +52,15 @@ ROI_HTML = """
             background: rgba(0,0,0,0.8); border-radius: 4px;
             white-space: nowrap; display: none;
         }
+        #controls { color: #ddd; font-size: 13px; margin-top: 6px;
+                     display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        #controls label { display: flex; align-items: center; gap: 4px; }
+        #controls input[type=range] { width: 150px; accent-color: #f0f; vertical-align: middle; }
+        #controls .val { color: #f0f; min-width: 36px; }
+        #controls button { background: #a0a; color: #fff; border: none; padding: 5px 14px;
+                           border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 13px; }
+        #controls button:hover { background: #c0c; }
+        #gcode-status { font-size: 12px; }
     </style>
 </head>
 <body>
@@ -61,6 +70,14 @@ ROI_HTML = """
         <canvas id="overlay"></canvas>
     </div>
     <div id="info">Loading...</div>
+    <div id="controls">
+        <label>Offset (mm):
+            <input type="range" id="offset" min="-20" max="20" value="5" step="0.5">
+            <span class="val" id="offset_val">5.0</span>
+        </label>
+        <button id="gen-gcode">Generate G-code</button>
+        <span id="gcode-status"></span>
+    </div>
     <div id="coord-tooltip"></div>
 <script>
 const img = document.getElementById('stream');
@@ -243,6 +260,50 @@ window.addEventListener('mouseup', () => {
 // redraw on image load / resize
 img.addEventListener('load', draw);
 window.addEventListener('resize', draw);
+
+// --- offset slider + gcode button ---
+const offsetSlider = document.getElementById('offset');
+const offsetVal = document.getElementById('offset_val');
+const gcodeBtn = document.getElementById('gen-gcode');
+const gcodeStatus = document.getElementById('gcode-status');
+
+fetch('/offset').then(r=>r.json()).then(d=>{
+    offsetSlider.value = d.offset_mm;
+    offsetVal.textContent = d.offset_mm.toFixed(1);
+});
+
+offsetSlider.addEventListener('input', () => {
+    offsetVal.textContent = parseFloat(offsetSlider.value).toFixed(1);
+    fetch('/offset', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({offset_mm: parseFloat(offsetSlider.value)})
+    });
+});
+
+gcodeBtn.addEventListener('click', () => {
+    gcodeStatus.textContent = 'Generating...';
+    gcodeStatus.style.color = '#ff0';
+    fetch('/gcode')
+    .then(r => {
+        if (!r.ok) return r.json().then(d => { throw new Error(d.error); });
+        return r.blob();
+    })
+    .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'racket_path.gcode'; a.click();
+        URL.revokeObjectURL(url);
+        gcodeStatus.textContent = 'Downloaded!';
+        gcodeStatus.style.color = '#0f0';
+        setTimeout(() => gcodeStatus.textContent = '', 3000);
+    })
+    .catch(e => {
+        gcodeStatus.textContent = e.message;
+        gcodeStatus.style.color = '#f44';
+        setTimeout(() => gcodeStatus.textContent = '', 4000);
+    });
+});
 </script>
 </body>
 </html>
@@ -290,6 +351,18 @@ parser.add_argument("--min-head-ratio", type=float, default=0.4,
                     help="Min fraction of head points for valid ellipse fit")
 parser.add_argument("--debug-vis", action="store_true",
                     help="Show intermediate masks and ellipse overlay")
+
+# Offset / G-code arguments
+parser.add_argument("--offset", type=float, default=5.0,
+                    help="Ellipse offset in mm (positive = outward)")
+parser.add_argument("--safe-z", type=float, default=10.0,
+                    help="G-code safe travel height in mm")
+parser.add_argument("--work-z", type=float, default=0.0,
+                    help="G-code work height in mm")
+parser.add_argument("--feed-rate", type=float, default=1000.0,
+                    help="G-code feed rate in mm/min")
+parser.add_argument("--gcode-output", type=str, default="racket_path.gcode",
+                    help="G-code output filename")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -304,6 +377,11 @@ shared_pose = (None, None)  # (R, t)
 # Debug visualization state shared with draw_overlay
 debug_info_lock = threading.Lock()
 shared_debug_info = {}
+
+# Offset ellipse state
+offset_lock = threading.Lock()
+shared_offset_mm = args.offset
+shared_offset_world = None  # latest (N, 2) offset world points for G-code
 
 # ---------------------------------------------------------------------------
 # AprilTag detector
@@ -352,6 +430,36 @@ if args.headless:
                        y_mm=round(float(pt[0, 1]), 1),
                        z_mm=0.0)
 
+    @stream.app.route("/offset", methods=["GET", "POST"])
+    def offset_endpoint():
+        global shared_offset_mm
+        if request.method == "POST":
+            data = request.get_json()
+            with offset_lock:
+                shared_offset_mm = float(data["offset_mm"])
+            return jsonify(ok=True)
+        with offset_lock:
+            return jsonify(offset_mm=shared_offset_mm)
+
+    @stream.app.route("/gcode", methods=["GET"])
+    def gcode_endpoint():
+        from flask import send_file
+        import io
+        with offset_lock:
+            pts = shared_offset_world
+        if pts is None:
+            return jsonify(error="No offset path yet (need tag + contour)"), 400
+        gcode = generate_gcode(pts, safe_z=args.safe_z,
+                               work_z=args.work_z, feed_rate=args.feed_rate)
+        # Also save to disk
+        with open(args.gcode_output, "w") as f:
+            f.write(gcode)
+        print(f"G-code saved to {args.gcode_output} ({len(pts)} points)")
+        buf = io.BytesIO(gcode.encode())
+        buf.seek(0)
+        return send_file(buf, mimetype="text/plain",
+                         as_attachment=True, download_name=args.gcode_output)
+
     stream.start()
 
 
@@ -385,6 +493,53 @@ def ellipse_point(t, cx, cy, w, h, angle_deg):
     ], axis=-1)
     return pts
 
+
+
+# ---------------------------------------------------------------------------
+# Offset path + G-code
+# ---------------------------------------------------------------------------
+def compute_offset_path(world_pts, offset_mm):
+    """Offset a closed 2D path outward by offset_mm using point normals.
+
+    Positive offset = outward (away from centroid), negative = inward.
+    """
+    center = world_pts.mean(axis=0)
+
+    # Central-difference tangents (wrapping)
+    tangents = np.roll(world_pts, -1, axis=0) - np.roll(world_pts, 1, axis=0)
+    lengths = np.linalg.norm(tangents, axis=1, keepdims=True)
+    lengths = np.maximum(lengths, 1e-6)
+    tangents /= lengths
+
+    # Normals: rotate tangent +90°
+    normals = np.stack([-tangents[:, 1], tangents[:, 0]], axis=1)
+
+    # Flip normals that point toward center (we want outward)
+    to_center = center - world_pts
+    dots = np.sum(normals * to_center, axis=1)
+    normals[dots > 0] *= -1
+
+    return world_pts + offset_mm * normals
+
+
+def generate_gcode(offset_pts, safe_z=10.0, work_z=0.0, feed_rate=1000.0):
+    """Generate G-code for a closed XY path on the Z=0 plane."""
+    lines = [
+        "; Racket offset path — generated by segment_racket_v2.py",
+        f"; {len(offset_pts)} points",
+        "G21 ; mm",
+        "G90 ; absolute",
+        f"G0 Z{safe_z:.1f}",
+        f"G0 X{offset_pts[0, 0]:.2f} Y{offset_pts[0, 1]:.2f}",
+        f"G1 Z{work_z:.1f} F{feed_rate / 2:.0f}",
+    ]
+    for pt in offset_pts[1:]:
+        lines.append(f"G1 X{pt[0]:.2f} Y{pt[1]:.2f} F{feed_rate:.0f}")
+    lines.append(f"G1 X{offset_pts[0, 0]:.2f} Y{offset_pts[0, 1]:.2f}")
+    lines.append(f"G0 Z{safe_z:.1f}")
+    lines.append("G0 X0 Y0")
+    lines.append("M2")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -537,8 +692,9 @@ def detect_tag(gray):
 # ---------------------------------------------------------------------------
 # Overlay drawing
 # ---------------------------------------------------------------------------
-def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
-    """Draw contour, tag axes, and status text on the frame."""
+def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False,
+                 offset_pixels=None, offset_mm=0.0):
+    """Draw contour, tag axes, offset path, and status text on the frame."""
     # ROI box in yellow
     if roi is not None:
         rx, ry, rw, rh = roi
@@ -547,6 +703,13 @@ def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
     # Contour in cyan
     if contour is not None:
         cv2.drawContours(frame, [contour], -1, (255, 255, 0), 2)
+
+    # Offset contour in magenta
+    if offset_pixels is not None:
+        pts = offset_pixels.round().astype(np.int32).reshape(-1, 1, 2)
+        cv2.drawContours(frame, [pts], -1, (255, 0, 255), 2)
+        cv2.putText(frame, f"offset: {offset_mm:+.1f} mm",
+                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
     # Debug: ellipse overlay + mask thumbnail
     if debug_vis:
@@ -642,6 +805,19 @@ print("-" * 60)
 
 last_world_pts = None
 
+# Local mode: offset trackbar (0–40 maps to -20..+20 mm)
+if not args.headless:
+    cv2.namedWindow("Racket Segmentation v2")
+    _offset_center = 20
+
+    def _offset_cb(val):
+        global shared_offset_mm
+        with offset_lock:
+            shared_offset_mm = float(val - _offset_center)
+
+    cv2.createTrackbar("Offset mm", "Racket Segmentation v2",
+                       int(args.offset) + _offset_center, 40, _offset_cb)
+
 try:
     while True:
         ret, frame = cap.read()
@@ -679,12 +855,28 @@ try:
             shared_pose = (R, t)
 
         world_pts = None
+        offset_pixel_pts = None
+        cur_offset = 0.0
         if contour is not None and R is not None:
             pixels = contour.reshape(-1, 2).astype(np.float64)
             world_pts = pixels_to_world(pixels, R, t)
             last_world_pts = world_pts
 
-        draw_overlay(frame, contour, R, t, world_pts, roi=roi, debug_vis=args.debug_vis)
+            # Compute offset path
+            with offset_lock:
+                cur_offset = shared_offset_mm
+            if abs(cur_offset) > 0.01:
+                off_world = compute_offset_path(world_pts, cur_offset)
+                with offset_lock:
+                    shared_offset_world = off_world
+                offset_pixel_pts = world_to_pixels(off_world, R, t)
+            else:
+                with offset_lock:
+                    shared_offset_world = world_pts
+
+        draw_overlay(frame, contour, R, t, world_pts, roi=roi,
+                     debug_vis=args.debug_vis, offset_pixels=offset_pixel_pts,
+                     offset_mm=cur_offset)
 
         # Debug: show intermediate masks in separate windows
         if args.debug_vis and not args.headless:
@@ -706,6 +898,17 @@ try:
                 break
             if key == ord('s') and last_world_pts is not None:
                 save_output(last_world_pts, args.format, args.output)
+            if key == ord('g'):
+                with offset_lock:
+                    gpts = shared_offset_world
+                if gpts is not None:
+                    gcode = generate_gcode(gpts, safe_z=args.safe_z,
+                                           work_z=args.work_z, feed_rate=args.feed_rate)
+                    with open(args.gcode_output, "w") as f:
+                        f.write(gcode)
+                    print(f"G-code saved to {args.gcode_output} ({len(gpts)} points)")
+                else:
+                    print("No offset path yet (need tag + contour)")
 
         # One-shot mode: save and exit as soon as we get a valid result
         if not args.continuous and world_pts is not None:

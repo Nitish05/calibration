@@ -65,3 +65,32 @@ def pixels_to_world(contour_pixels: np.ndarray, R: np.ndarray, t: np.ndarray) ->
 
     # Convert meters to millimeters
     return world_pts * 1000.0
+
+
+def world_to_pixels(world_mm: np.ndarray, R: np.ndarray, t: np.ndarray) -> np.ndarray:
+    """Convert world XY (mm) on Z=0 plane back to pixel coordinates.
+
+    Parameters
+    ----------
+    world_mm : (N, 2) array of (x_mm, y_mm) in AprilTag world frame
+    R : (3, 3) rotation matrix  (camera <- tag)
+    t : (3, 1) translation vector (camera <- tag)
+
+    Returns
+    -------
+    (N, 2) array of (u, v) pixel coordinates
+    """
+    pts = np.asarray(world_mm, dtype=np.float64)
+    if pts.ndim == 1:
+        pts = pts.reshape(1, 2)
+
+    # Convert mm to meters, add Z=0
+    pts_m = np.hstack([pts / 1000.0, np.zeros((len(pts), 1))])  # (N, 3)
+
+    # Transform to camera frame: p_cam = R @ p_tag + t
+    p_cam = (R @ pts_m.T + t.reshape(3, 1)).T  # (N, 3)
+
+    # Project to pixels
+    u = FX * p_cam[:, 0] / p_cam[:, 2] + CX
+    v = FY * p_cam[:, 1] / p_cam[:, 2] + CY
+    return np.stack([u, v], axis=1)
