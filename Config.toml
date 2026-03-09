@@ -6,7 +6,7 @@ calibration_type = "calculate"
 
 [calibration.calculate.intrinsics]
 overwrite_intrinsics = false
-show_detection_intrinsics = true
+show_detection_intrinsics = false
 intrinsics_extension = "mp4"
 extract_every_N_sec = 1
 intrinsics_corners_nb = [8, 5]
