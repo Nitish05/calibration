@@ -4,15 +4,7 @@ import argparse
 from pupil_apriltags import Detector
 from stream import StreamServer
 from camera import Camera
-
-# Camera intrinsics from calibration (C920 @ 1920x1080)
-FX = 2025.9561727564542
-FY = 2026.9282796080697
-CX = 959.5
-CY = 539.5
-
-# AprilTag settings
-TAG_SIZE = 0.05684  # 56.84 mm
+from transforms import FX, FY, CX, CY, TAG_SIZE, CAMERA_MATRIX
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true", help="Stream via HTTP instead of cv2.imshow")
@@ -27,12 +19,6 @@ detector = Detector(
     decode_sharpening=0.25,
     refine_edges=True,
 )
-
-CAMERA_MATRIX = np.array([
-    [FX, 0.0, CX],
-    [0.0, FY, CY],
-    [0.0, 0.0, 1.0]
-])
 
 cap = Camera()
 
