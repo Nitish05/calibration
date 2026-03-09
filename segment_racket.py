@@ -252,9 +252,9 @@ parser.add_argument("--continuous", action="store_true", help="Live preview; pre
 parser.add_argument("--epsilon", type=float, default=2.0, help="approxPolyDP epsilon (px)")
 parser.add_argument("--min-area", type=int, default=50000, help="Minimum contour area (px^2) to consider")
 parser.add_argument("--hsv-low", type=int, nargs=3, metavar=("H", "S", "V"),
-                    default=[10, 30, 50], help="Lower HSV bound for board color")
+                    default=[8, 30, 80], help="Lower HSV bound for board color")
 parser.add_argument("--hsv-high", type=int, nargs=3, metavar=("H", "S", "V"),
-                    default=[25, 200, 220], help="Upper HSV bound for board color")
+                    default=[30, 200, 230], help="Upper HSV bound for board color")
 parser.add_argument("--dark-thresh", type=int, default=15,
                     help="Exclude pixels with V < this value (hole shadows)")
 parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
@@ -325,7 +325,7 @@ if args.headless:
 # Segmentation helpers
 # ---------------------------------------------------------------------------
 def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
-                   roi=None, hsv_low=(10, 30, 50), hsv_high=(25, 200, 220),
+                   roi=None, hsv_low=(8, 30, 80), hsv_high=(30, 200, 230),
                    dark_thresh=15):
     """Return the simplified outer contour of the racket, or None.
 
