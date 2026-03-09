@@ -255,7 +255,7 @@ parser.add_argument("--hsv-low", type=int, nargs=3, metavar=("H", "S", "V"),
                     default=[10, 30, 50], help="Lower HSV bound for board color")
 parser.add_argument("--hsv-high", type=int, nargs=3, metavar=("H", "S", "V"),
                     default=[25, 200, 220], help="Upper HSV bound for board color")
-parser.add_argument("--dark-thresh", type=int, default=40,
+parser.add_argument("--dark-thresh", type=int, default=15,
                     help="Exclude pixels with V < this value (hole shadows)")
 parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     default=[130, 100, 870, 620],
@@ -326,7 +326,7 @@ if args.headless:
 # ---------------------------------------------------------------------------
 def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
                    roi=None, hsv_low=(10, 30, 50), hsv_high=(25, 200, 220),
-                   dark_thresh=40):
+                   dark_thresh=15):
     """Return the simplified outer contour of the racket, or None.
 
     roi: (x, y, w, h) — if provided, only search inside this region.
