@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 from flask import request, jsonify
 from pupil_apriltags import Detector
+from scipy.interpolate import splprep, splev
 
 from camera import Camera
 from stream import StreamServer
@@ -257,6 +258,8 @@ parser.add_argument("--hsv-high", type=int, nargs=3, metavar=("H", "S", "V"),
                     default=[30, 200, 230], help="Upper HSV bound for board color")
 parser.add_argument("--dark-thresh", type=int, default=15,
                     help="Exclude pixels with V < this value (hole shadows)")
+parser.add_argument("--smooth-points", type=int, default=200,
+                    help="Number of evenly-spaced points on the smoothed contour (0 = disable smoothing)")
 parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     default=[130, 100, 870, 620],
                     help="Region of interest (x y w h) in pixels — only segment inside this box")
@@ -326,7 +329,7 @@ if args.headless:
 # ---------------------------------------------------------------------------
 def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
                    roi=None, hsv_low=(8, 30, 80), hsv_high=(30, 200, 230),
-                   dark_thresh=15):
+                   dark_thresh=15, smooth_points=200):
     """Return the simplified outer contour of the racket, or None.
 
     roi: (x, y, w, h) — if provided, only search inside this region.
@@ -380,7 +383,21 @@ def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
         simplified[:, :, 0] += ox
         simplified[:, :, 1] += oy
 
+    if smooth_points > 0 and len(simplified) >= 4:
+        simplified = smooth_contour(simplified, smooth_points)
+
     return simplified
+
+
+def smooth_contour(contour, num_points):
+    """Fit a periodic cubic spline through contour points and resample evenly."""
+    x = contour[:, 0, 0].astype(np.float64)
+    y = contour[:, 0, 1].astype(np.float64)
+    tck, _ = splprep([x, y], s=0, per=True, k=3)
+    u_new = np.linspace(0, 1, num_points)
+    x_new, y_new = splev(u_new, tck)
+    result = np.stack([x_new, y_new], axis=-1).round().astype(np.int32)
+    return result.reshape(-1, 1, 2)
 
 
 def detect_tag(gray: np.ndarray):
@@ -459,7 +476,7 @@ def save_output(world_pts: np.ndarray, fmt: str, filename: str):
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
-print(f"Racket segmentation | epsilon={args.epsilon} | min_area={args.min_area} | roi={list(shared_roi)}")
+print(f"Racket segmentation | epsilon={args.epsilon} | smooth_points={args.smooth_points} | min_area={args.min_area} | roi={list(shared_roi)}")
 print(f"Output: {args.output}.{args.format}")
 if args.continuous:
     save_key = "'s' to save" if not args.headless else "Ctrl+C to save last"
@@ -484,7 +501,8 @@ try:
         contour = segment_racket(frame, args.min_area, args.epsilon, roi=roi,
                                  hsv_low=tuple(args.hsv_low),
                                  hsv_high=tuple(args.hsv_high),
-                                 dark_thresh=args.dark_thresh)
+                                 dark_thresh=args.dark_thresh,
+                                 smooth_points=args.smooth_points)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         R, t = detect_tag(gray)
 
