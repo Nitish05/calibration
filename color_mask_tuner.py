@@ -28,14 +28,18 @@ parser.add_argument("--headless", action="store_true", help="Stream via HTTP ins
 parser.add_argument("--port", type=int, default=8082, help="HTTP port (default: 8082)")
 parser.add_argument("--use-picamera", action="store_true", help="Use picamera2 for CSI camera")
 parser.add_argument("--h-low", type=int, default=0, help="Initial HSV H lower bound")
-parser.add_argument("--h-high", type=int, default=180, help="Initial HSV H upper bound")
+parser.add_argument("--h-high", type=int, default=20, help="Initial HSV H upper bound")
 parser.add_argument("--s-low", type=int, default=0, help="Initial HSV S lower bound")
-parser.add_argument("--s-high", type=int, default=255, help="Initial HSV S upper bound")
-parser.add_argument("--v-low", type=int, default=0, help="Initial HSV V lower bound")
-parser.add_argument("--v-high", type=int, default=255, help="Initial HSV V upper bound")
-parser.add_argument("--l-thresh", type=int, default=90, help="Initial LAB L-channel threshold")
-parser.add_argument("--invert", action="store_true",
+parser.add_argument("--s-high", type=int, default=85, help="Initial HSV S upper bound")
+parser.add_argument("--v-low", type=int, default=50, help="Initial HSV V lower bound")
+parser.add_argument("--v-high", type=int, default=220, help="Initial HSV V upper bound")
+parser.add_argument("--l-thresh", type=int, default=72, help="Initial LAB L-channel threshold")
+parser.add_argument("--invert", action="store_true", default=True,
                     help="Invert HSV mask (define background range to exclude)")
+parser.add_argument("--no-invert", dest="invert", action="store_false",
+                    help="Don't invert HSV mask")
+parser.add_argument("--no-lab", action="store_true",
+                    help="Skip LAB L-threshold, use only HSV mask (for non-black rackets)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -51,6 +55,7 @@ shared_sliders = {
     "v_high": args.v_high,
     "l_thresh": args.l_thresh,
     "invert": 1 if args.invert else 0,
+    "no_lab": 1 if args.no_lab else 0,
 }
 
 frame_lock = threading.Lock()
@@ -70,11 +75,13 @@ def apply_masks(frame, sliders):
     if sliders["invert"]:
         hsv_mask = cv2.bitwise_not(hsv_mask)
 
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    L = lab[:, :, 0]
-    lab_mask = (L < sliders["l_thresh"]).astype(np.uint8) * 255
-
-    combined = hsv_mask & lab_mask
+    if sliders["no_lab"]:
+        combined = hsv_mask
+    else:
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        L = lab[:, :, 0]
+        lab_mask = (L < sliders["l_thresh"]).astype(np.uint8) * 255
+        combined = hsv_mask & lab_mask
 
     # Overlay: masked-in full brightness, masked-out dimmed to 30%
     dimmed = (frame * 0.3).astype(np.uint8)
@@ -200,6 +207,11 @@ TUNER_HTML = """
                 <input type="range" id="invert" min="0" max="1" value="">
                 <span class="val" id="invert_val"></span>
             </div>
+            <div class="slider-row">
+                <label>No LAB</label>
+                <input type="range" id="no_lab" min="0" max="1" value="">
+                <span class="val" id="no_lab_val"></span>
+            </div>
         </div>
     </div>
     <div id="color-tooltip">
@@ -215,7 +227,7 @@ const tooltip = document.getElementById('color-tooltip');
 const ctSwatch = document.getElementById('ct-swatch');
 const ctText = document.getElementById('ct-text');
 
-const SLIDER_KEYS = ['h_low','h_high','s_low','s_high','v_low','v_high','l_thresh','invert'];
+const SLIDER_KEYS = ['h_low','h_high','s_low','s_high','v_low','v_high','l_thresh','invert','no_lab'];
 
 // --- fetch initial slider values ---
 fetch('/sliders').then(r=>r.json()).then(d => {
@@ -362,6 +374,7 @@ if not args.headless:
     cv2.createTrackbar("V High",  WINDOW, args.v_high,  255, make_cb("v_high"))
     cv2.createTrackbar("L Thresh", WINDOW, args.l_thresh, 255, make_cb("l_thresh"))
     cv2.createTrackbar("Invert",  WINDOW, 1 if args.invert else 0, 1, make_cb("invert"))
+    cv2.createTrackbar("No LAB",  WINDOW, 1 if args.no_lab else 0, 1, make_cb("no_lab"))
 
     def mouse_cb(event, x, y, flags, param):
         global hover_pos
@@ -439,12 +452,13 @@ with slider_lock:
     final = dict(shared_sliders)
 
 inv_flag = " --invert-hsv" if final["invert"] else ""
+nolab_flag = " --no-lab" if final["no_lab"] else ""
 print("\n" + "=" * 60)
 print("Final slider values:")
 print(f"  --h-low {final['h_low']} --h-high {final['h_high']} "
       f"--s-low {final['s_low']} --s-high {final['s_high']} "
       f"--v-low {final['v_low']} --v-high {final['v_high']} "
-      f"--l-thresh {final['l_thresh']}{inv_flag}")
+      f"--l-thresh {final['l_thresh']}{inv_flag}{nolab_flag}")
 print("=" * 60)
 
 cap.release()

@@ -266,16 +266,20 @@ parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
 parser.add_argument("--epsilon", type=float, default=2.0, help="(compat only, unused in v2)")
 
 # v2-specific arguments
-parser.add_argument("--l-thresh", type=int, default=90,
+parser.add_argument("--l-thresh", type=int, default=72,
                     help="LAB L-channel threshold (pixels with L < this are 'dark'/frame)")
 parser.add_argument("--h-low", type=int, default=0, help="HSV H lower bound")
-parser.add_argument("--h-high", type=int, default=180, help="HSV H upper bound")
+parser.add_argument("--h-high", type=int, default=20, help="HSV H upper bound")
 parser.add_argument("--s-low", type=int, default=0, help="HSV S lower bound")
-parser.add_argument("--s-high", type=int, default=255, help="HSV S upper bound")
-parser.add_argument("--v-low", type=int, default=0, help="HSV V lower bound")
-parser.add_argument("--v-high", type=int, default=255, help="HSV V upper bound")
-parser.add_argument("--invert-hsv", action="store_true",
+parser.add_argument("--s-high", type=int, default=85, help="HSV S upper bound")
+parser.add_argument("--v-low", type=int, default=50, help="HSV V lower bound")
+parser.add_argument("--v-high", type=int, default=220, help="HSV V upper bound")
+parser.add_argument("--invert-hsv", action="store_true", default=True,
                     help="Invert HSV mask (HSV range defines background to exclude)")
+parser.add_argument("--no-invert-hsv", dest="invert_hsv", action="store_false",
+                    help="Don't invert HSV mask")
+parser.add_argument("--no-lab", action="store_true",
+                    help="Skip LAB L-threshold, use only HSV mask (for non-black rackets)")
 parser.add_argument("--open-kernel", type=int, default=9,
                     help="Morph opening kernel diameter (> string width, < frame width)")
 parser.add_argument("--close-kernel", type=int, default=25,
@@ -390,7 +394,7 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
                    open_kernel=9, close_kernel=15,
                    head_dist_thresh=20.0, min_head_ratio=0.4,
                    smooth_points=200, debug_vis=False,
-                   hsv_range=None, invert_hsv=False):
+                   hsv_range=None, invert_hsv=False, no_lab=False):
     """Segment racket head using LAB thresholding + ellipse fit.
 
     Returns the head ellipse as a sampled contour (N, 1, 2) int32, or None.
@@ -404,10 +408,14 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
         crop = frame[ry:ry + rh, rx:rx + rw]
         ox, oy = rx, ry
 
-    # --- Step 1: LAB color segmentation ---
-    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-    L = lab[:, :, 0]
-    dark_mask = (L < l_thresh).astype(np.uint8) * 255
+    # --- Step 1: Build mask ---
+    if no_lab:
+        # Pure HSV mask (no LAB L-threshold) — works for any color racket
+        mask = np.ones(crop.shape[:2], dtype=np.uint8) * 255
+    else:
+        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+        L = lab[:, :, 0]
+        mask = (L < l_thresh).astype(np.uint8) * 255
 
     # --- Step 1b: Optional HSV masking ---
     if hsv_range is not None:
@@ -415,7 +423,8 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
         hsv_mask = cv2.inRange(hsv, hsv_range[0], hsv_range[1])
         if invert_hsv:
             hsv_mask = cv2.bitwise_not(hsv_mask)
-        dark_mask = dark_mask & hsv_mask
+        mask = mask & hsv_mask
+    dark_mask = mask
 
     # --- Step 2: Morphological opening — remove strings ---
     k_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_kernel, open_kernel))
@@ -644,14 +653,10 @@ try:
         with roi_lock:
             roi = tuple(shared_roi)
 
-        # Build HSV range if any HSV args differ from full range
-        hsv_range = None
-        if (args.h_low, args.h_high, args.s_low, args.s_high,
-                args.v_low, args.v_high) != (0, 180, 0, 255, 0, 255):
-            hsv_range = (
-                np.array([args.h_low, args.s_low, args.v_low]),
-                np.array([args.h_high, args.s_high, args.v_high]),
-            )
+        hsv_range = (
+            np.array([args.h_low, args.s_low, args.v_low]),
+            np.array([args.h_high, args.s_high, args.v_high]),
+        )
 
         contour = segment_racket(
             frame, args.min_area, roi=roi,
@@ -664,6 +669,7 @@ try:
             debug_vis=args.debug_vis,
             hsv_range=hsv_range,
             invert_hsv=args.invert_hsv,
+            no_lab=args.no_lab,
         )
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
