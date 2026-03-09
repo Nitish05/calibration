@@ -34,6 +34,8 @@ parser.add_argument("--s-high", type=int, default=255, help="Initial HSV S upper
 parser.add_argument("--v-low", type=int, default=0, help="Initial HSV V lower bound")
 parser.add_argument("--v-high", type=int, default=255, help="Initial HSV V upper bound")
 parser.add_argument("--l-thresh", type=int, default=90, help="Initial LAB L-channel threshold")
+parser.add_argument("--invert", action="store_true",
+                    help="Invert HSV mask (define background range to exclude)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -48,6 +50,7 @@ shared_sliders = {
     "v_low": args.v_low,
     "v_high": args.v_high,
     "l_thresh": args.l_thresh,
+    "invert": 1 if args.invert else 0,
 }
 
 frame_lock = threading.Lock()
@@ -64,6 +67,9 @@ def apply_masks(frame, sliders):
     high = np.array([sliders["h_high"], sliders["s_high"], sliders["v_high"]])
     hsv_mask = cv2.inRange(hsv, low, high)
 
+    if sliders["invert"]:
+        hsv_mask = cv2.bitwise_not(hsv_mask)
+
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
     L = lab[:, :, 0]
     lab_mask = (L < sliders["l_thresh"]).astype(np.uint8) * 255
@@ -77,10 +83,11 @@ def apply_masks(frame, sliders):
 
     # Pixel count text
     px_count = int(np.count_nonzero(combined))
+    inv_tag = " [INV]" if sliders["invert"] else ""
     text = (f"H:{sliders['h_low']}-{sliders['h_high']}  "
             f"S:{sliders['s_low']}-{sliders['s_high']}  "
             f"V:{sliders['v_low']}-{sliders['v_high']}  "
-            f"L<{sliders['l_thresh']}  "
+            f"L<{sliders['l_thresh']}{inv_tag}  "
             f"px:{px_count}")
     cv2.putText(vis, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
@@ -187,6 +194,12 @@ TUNER_HTML = """
                 <input type="range" id="l_thresh" min="0" max="255" value="">
                 <span class="val" id="l_thresh_val"></span>
             </div>
+            <h2>Mode</h2>
+            <div class="slider-row">
+                <label>Invert</label>
+                <input type="range" id="invert" min="0" max="1" value="">
+                <span class="val" id="invert_val"></span>
+            </div>
         </div>
     </div>
     <div id="color-tooltip">
@@ -202,7 +215,7 @@ const tooltip = document.getElementById('color-tooltip');
 const ctSwatch = document.getElementById('ct-swatch');
 const ctText = document.getElementById('ct-text');
 
-const SLIDER_KEYS = ['h_low','h_high','s_low','s_high','v_low','v_high','l_thresh'];
+const SLIDER_KEYS = ['h_low','h_high','s_low','s_high','v_low','v_high','l_thresh','invert'];
 
 // --- fetch initial slider values ---
 fetch('/sliders').then(r=>r.json()).then(d => {
@@ -348,6 +361,7 @@ if not args.headless:
     cv2.createTrackbar("V Low",   WINDOW, args.v_low,   255, make_cb("v_low"))
     cv2.createTrackbar("V High",  WINDOW, args.v_high,  255, make_cb("v_high"))
     cv2.createTrackbar("L Thresh", WINDOW, args.l_thresh, 255, make_cb("l_thresh"))
+    cv2.createTrackbar("Invert",  WINDOW, 1 if args.invert else 0, 1, make_cb("invert"))
 
     def mouse_cb(event, x, y, flags, param):
         global hover_pos
@@ -424,12 +438,13 @@ except KeyboardInterrupt:
 with slider_lock:
     final = dict(shared_sliders)
 
+inv_flag = " --invert-hsv" if final["invert"] else ""
 print("\n" + "=" * 60)
 print("Final slider values:")
 print(f"  --h-low {final['h_low']} --h-high {final['h_high']} "
       f"--s-low {final['s_low']} --s-high {final['s_high']} "
       f"--v-low {final['v_low']} --v-high {final['v_high']} "
-      f"--l-thresh {final['l_thresh']}")
+      f"--l-thresh {final['l_thresh']}{inv_flag}")
 print("=" * 60)
 
 cap.release()
