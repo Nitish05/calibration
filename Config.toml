@@ -10,6 +10,7 @@ show_detection_intrinsics = true
 intrinsics_extension = "mp4"
 extract_every_N_sec = 1
 intrinsics_corners_nb = [8, 5]
+# Note: re-calibrate on the Pi - intrinsics differ per camera
 intrinsics_square_size = 9.37
 fisheye = false
 

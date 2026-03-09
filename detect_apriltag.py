@@ -34,7 +34,7 @@ CAMERA_MATRIX = np.array([
     [0.0, 0.0, 1.0]
 ])
 
-cap = Camera(width=1920, height=1080)
+cap = Camera()
 
 stream = None
 if args.headless:

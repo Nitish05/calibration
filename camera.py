@@ -7,7 +7,7 @@ import numpy as np
 
 
 class Camera:
-    def __init__(self, width=1280, height=720, device=0):
+    def __init__(self, width=640, height=480, device=1):
         self.width = width
         self.height = height
         self._picam2 = None
