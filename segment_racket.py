@@ -38,6 +38,12 @@ ROI_HTML = """
         .wrap img { display: block; max-width: 100vw; max-height: 88vh; }
         .wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         #info { color: #0ff; font-size: 13px; margin-top: 6px; }
+        #coord-tooltip {
+            position: fixed; pointer-events: none; z-index: 9999;
+            font-family: monospace; font-size: 13px; padding: 4px 8px;
+            background: rgba(0,0,0,0.8); border-radius: 4px;
+            white-space: nowrap; display: none;
+        }
     </style>
 </head>
 <body>
@@ -47,11 +53,13 @@ ROI_HTML = """
         <canvas id="overlay"></canvas>
     </div>
     <div id="info">Loading...</div>
+    <div id="coord-tooltip"></div>
 <script>
 const img = document.getElementById('stream');
 const canvas = document.getElementById('overlay');
 const ctx = canvas.getContext('2d');
 const info = document.getElementById('info');
+const tooltip = document.getElementById('coord-tooltip');
 
 const CAM_W = 1920, CAM_H = 1080;
 const HANDLE = 10;
@@ -132,6 +140,39 @@ function hitTest(mx, my) {
 const cursors = {nw:'nw-resize',ne:'ne-resize',sw:'sw-resize',se:'se-resize',
                  n:'n-resize',s:'s-resize',w:'w-resize',e:'e-resize',move:'grab'};
 
+// --- world coord tooltip ---
+let wcAborter = null;
+let wcLastTime = 0;
+const WC_INTERVAL = 100; // ms → max 10 req/sec
+
+function fetchWorldCoord(camU, camV, clientX, clientY) {
+    const now = Date.now();
+    if (now - wcLastTime < WC_INTERVAL) return;
+    wcLastTime = now;
+    if (wcAborter) wcAborter.abort();
+    wcAborter = new AbortController();
+    fetch('/world_coord', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({u: Math.round(camU), v: Math.round(camV)}),
+        signal: wcAborter.signal
+    })
+    .then(r => r.json())
+    .then(d => {
+        tooltip.style.display = 'block';
+        tooltip.style.left = (clientX + 14) + 'px';
+        tooltip.style.top  = (clientY + 14) + 'px';
+        if (d.error) {
+            tooltip.style.color = '#f44';
+            tooltip.textContent = d.error;
+        } else {
+            tooltip.style.color = '#0f0';
+            tooltip.textContent = 'X: ' + d.x_mm.toFixed(1) + ' mm  Y: ' + d.y_mm.toFixed(1) + ' mm';
+        }
+    })
+    .catch(() => {});
+}
+
 // --- mouse events ---
 canvas.addEventListener('mousemove', e => {
     const rect = canvas.getBoundingClientRect();
@@ -139,6 +180,8 @@ canvas.addEventListener('mousemove', e => {
     if (!drag) {
         const h = hitTest(mx, my);
         canvas.style.cursor = h ? (cursors[h]||'default') : 'default';
+        const [camU, camV] = toCam(mx, my);
+        fetchWorldCoord(camU, camV, e.clientX, e.clientY);
         return;
     }
     const dx = mx - dragStart.x, dy = my - dragStart.y;
@@ -162,6 +205,7 @@ canvas.addEventListener('mousemove', e => {
 });
 
 canvas.addEventListener('mousedown', e => {
+    tooltip.style.display = 'none';
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const h = hitTest(mx, my);
@@ -171,6 +215,8 @@ canvas.addEventListener('mousedown', e => {
     roiStart = {...roi};
     if (h==='move') canvas.style.cursor = 'grabbing';
 });
+
+canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
 
 window.addEventListener('mouseup', () => {
     if (drag) {
@@ -205,6 +251,12 @@ parser.add_argument("--format", choices=["csv", "json"], default="csv")
 parser.add_argument("--continuous", action="store_true", help="Live preview; press 's' to save or wait for Ctrl+C")
 parser.add_argument("--epsilon", type=float, default=2.0, help="approxPolyDP epsilon (px)")
 parser.add_argument("--min-area", type=int, default=50000, help="Minimum contour area (px^2) to consider")
+parser.add_argument("--hsv-low", type=int, nargs=3, metavar=("H", "S", "V"),
+                    default=[10, 30, 50], help="Lower HSV bound for board color")
+parser.add_argument("--hsv-high", type=int, nargs=3, metavar=("H", "S", "V"),
+                    default=[25, 200, 220], help="Upper HSV bound for board color")
+parser.add_argument("--dark-thresh", type=int, default=40,
+                    help="Exclude pixels with V < this value (hole shadows)")
 parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     default=[130, 100, 870, 620],
                     help="Region of interest (x y w h) in pixels — only segment inside this box")
@@ -215,6 +267,9 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 roi_lock = threading.Lock()
 shared_roi = list(args.roi)  # [x, y, w, h]
+
+pose_lock = threading.Lock()
+shared_pose = (None, None)  # (R, t)
 
 # ---------------------------------------------------------------------------
 # AprilTag detector (same config as detect_apriltag.py)
@@ -250,30 +305,54 @@ if args.headless:
             r = list(shared_roi)
         return jsonify(x=r[0], y=r[1], w=r[2], h=r[3])
 
+    @stream.app.route("/world_coord", methods=["POST"])
+    def world_coord_endpoint():
+        data = request.get_json()
+        u, v = float(data["u"]), float(data["v"])
+        with pose_lock:
+            R, t = shared_pose
+        if R is None:
+            return jsonify(error="NO TAG")
+        pt = pixels_to_world(np.array([[u, v]]), R, t)
+        return jsonify(x_mm=round(float(pt[0, 0]), 1),
+                       y_mm=round(float(pt[0, 1]), 1),
+                       z_mm=0.0)
+
     stream.start()
 
 
 # ---------------------------------------------------------------------------
 # Segmentation helpers
 # ---------------------------------------------------------------------------
-def segment_racket(frame: np.ndarray, min_area: int, epsilon: float, roi=None):
+def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
+                   roi=None, hsv_low=(10, 30, 50), hsv_high=(25, 200, 220),
+                   dark_thresh=40):
     """Return the simplified outer contour of the racket, or None.
 
     roi: (x, y, w, h) — if provided, only search inside this region.
          Returned contour coordinates are in full-frame space.
+    hsv_low / hsv_high: HSV bounds for the board color (excluded).
+    dark_thresh: pixels with V < this are excluded (hole shadows).
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Crop to ROI for segmentation
+    # Crop to ROI first (operate on color frame)
     ox, oy = 0, 0
+    crop = frame
     if roi is not None:
         rx, ry, rw, rh = roi
-        gray = gray[ry:ry + rh, rx:rx + rw]
+        crop = frame[ry:ry + rh, rx:rx + rw]
         ox, oy = rx, ry
 
+    # HSV masking — identify board color and dark shadows
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    board_mask = cv2.inRange(hsv, np.array(hsv_low), np.array(hsv_high))
+    dark_mask = cv2.inRange(hsv[:, :, 2], 0, dark_thresh)
+    background = board_mask | dark_mask
+    foreground = cv2.bitwise_not(background)
+
+    # Grayscale adaptive threshold
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # Adaptive threshold — dark racket on lighter board becomes white foreground
     thresh = cv2.adaptiveThreshold(
         blurred, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
@@ -282,9 +361,12 @@ def segment_racket(frame: np.ndarray, min_area: int, epsilon: float, roi=None):
         C=10,
     )
 
+    # Combine: only keep threshold pixels that are NOT board/shadow
+    combined = thresh & foreground
+
     # Morphological close (fill gaps) then open (remove noise)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+    closed = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel, iterations=2)
     opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel, iterations=1)
 
     contours, _ = cv2.findContours(opened, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -407,9 +489,15 @@ try:
         with roi_lock:
             roi = tuple(shared_roi)
 
+        contour = segment_racket(frame, args.min_area, args.epsilon, roi=roi,
+                                 hsv_low=tuple(args.hsv_low),
+                                 hsv_high=tuple(args.hsv_high),
+                                 dark_thresh=args.dark_thresh)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        contour = segment_racket(frame, args.min_area, args.epsilon, roi=roi)
         R, t = detect_tag(gray)
+
+        with pose_lock:
+            shared_pose = (R, t)
 
         world_pts = None
         if contour is not None and R is not None:
