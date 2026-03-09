@@ -422,22 +422,29 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
               f"after_open={np.count_nonzero(opened)}, after_close={np.count_nonzero(closed)})")
         return None
 
-    areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)[:5]
-    big = [c for c in contours if cv2.contourArea(c) >= min_area]
+    areas_sorted = sorted([(cv2.contourArea(c), c) for c in contours],
+                          key=lambda x: x[0], reverse=True)
+    top_areas = [int(a) for a, _ in areas_sorted[:5]]
+    big = [(a, c) for a, c in areas_sorted if a >= min_area]
     if not big:
-        print(f"[v2] no contour >= min_area={min_area}  top areas: {[int(a) for a in areas]}")
+        print(f"[v2] no contour >= min_area={min_area}  top areas: {top_areas}")
         return None
 
-    largest = max(big, key=cv2.contourArea)
+    # Merge the largest contours that are likely two halves of the racket ring.
+    # If the 2nd-largest is at least 40% the size of the largest, merge them.
+    merged = big[0][1]
+    if len(big) >= 2 and big[1][0] >= big[0][0] * 0.4:
+        merged = np.vstack([big[0][1], big[1][1]])
+        print(f"[v2] merged top 2 contours: {int(big[0][0])} + {int(big[1][0])}")
 
     # Need at least 5 points for fitEllipse
-    if len(largest) < 5:
+    if len(merged) < 5:
         return None
 
     # --- Step 5–7: Iterative ellipse fit ---
     # Initial fit on all contour points, then iteratively refit on head-only
     # points. Each pass the ellipse converges toward the true head shape.
-    contour_pts = largest.reshape(-1, 2).astype(np.float64)
+    contour_pts = merged.reshape(-1, 2).astype(np.float64)
     ellipse = cv2.fitEllipse(largest)
     MAX_ITERS = 5
 
