@@ -342,13 +342,6 @@ def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
         crop = frame[ry:ry + rh, rx:rx + rw]
         ox, oy = rx, ry
 
-    # HSV masking — identify board color and dark shadows
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    board_mask = cv2.inRange(hsv, np.array(hsv_low), np.array(hsv_high))
-    dark_mask = cv2.inRange(hsv[:, :, 2], 0, dark_thresh)
-    background = board_mask | dark_mask
-    foreground = cv2.bitwise_not(background)
-
     # Grayscale adaptive threshold
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -361,8 +354,7 @@ def segment_racket(frame: np.ndarray, min_area: int, epsilon: float,
         C=10,
     )
 
-    # Combine: only keep threshold pixels that are NOT board/shadow
-    combined = thresh & foreground
+    combined = thresh
 
     # Morphological close (fill gaps) then open (remove noise)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
