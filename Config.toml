@@ -1,0 +1,24 @@
+[project]
+project_dir = "."
+
+[calibration]
+calibration_type = "calculate"
+
+[calibration.calculate.intrinsics]
+overwrite_intrinsics = false
+show_detection_intrinsics = true
+intrinsics_extension = "mp4"
+extract_every_N_sec = 1
+intrinsics_corners_nb = [8, 5]
+intrinsics_square_size = 9.37
+fisheye = false
+
+[calibration.calculate.extrinsics]
+calculate_extrinsics = false
+extrinsics_method = "board_outer"
+
+[calibration.calculate.extrinsics.board]
+extrinsics_corners_nb = [9, 6]
+extrinsics_square_size = 25
+extrinsics_extension = "png"
+show_reprojection_error = true

@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Calibration data (large files)
+intrinsics/cam_00/*.mp4
+intrinsics/cam_00/*.png
+calibration/
+Calib_board_outer.toml
