@@ -5,11 +5,11 @@ from pupil_apriltags import Detector
 from stream import StreamServer
 from camera import Camera
 
-# Camera intrinsics from calibration
-FX = 1490.5559771045255
-FY = 1510.4154565513206
-CX = 639.5
-CY = 359.5
+# Camera intrinsics from calibration (C920 @ 1920x1080)
+FX = 2025.9561727564542
+FY = 2026.9282796080697
+CX = 959.5
+CY = 539.5
 
 # AprilTag settings
 TAG_SIZE = 0.05684  # 56.84 mm
