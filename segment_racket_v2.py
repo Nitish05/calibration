@@ -418,10 +418,14 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
     # --- Step 4: Find contours, take largest ---
     contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
+        print(f"[v2] no contours found (dark_px={np.count_nonzero(dark_mask)}, "
+              f"after_open={np.count_nonzero(opened)}, after_close={np.count_nonzero(closed)})")
         return None
 
+    areas = sorted([cv2.contourArea(c) for c in contours], reverse=True)[:5]
     big = [c for c in contours if cv2.contourArea(c) >= min_area]
     if not big:
+        print(f"[v2] no contour >= min_area={min_area}  top areas: {[int(a) for a in areas]}")
         return None
 
     largest = max(big, key=cv2.contourArea)
@@ -508,18 +512,18 @@ def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
     if contour is not None:
         cv2.drawContours(frame, [contour], -1, (255, 255, 0), 2)
 
-    # Debug: ellipse overlay + junction points
+    # Debug: ellipse overlay + mask thumbnail
     if debug_vis:
         with debug_info_lock:
             di = dict(shared_debug_info)
 
         if di.get("ellipse") is not None:
             (ecx, ecy), (ew, eh), eangle = di["ellipse"]
-            ox, oy = 0, 0
+            dox, doy = 0, 0
             if roi is not None:
-                ox, oy = roi[0], roi[1]
+                dox, doy = roi[0], roi[1]
             cv2.ellipse(frame,
-                        (int(ecx + ox), int(ecy + oy)),
+                        (int(ecx + dox), int(ecy + doy)),
                         (int(ew / 2), int(eh / 2)),
                         eangle, 0, 360, (0, 255, 0), 1)
 
@@ -530,6 +534,16 @@ def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
         if di.get("fallback"):
             cv2.putText(frame, "FALLBACK (initial ellipse)",
                         (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+        # Inset mask thumbnail in bottom-left corner
+        mask = di.get("closed", di.get("dark_mask"))
+        if mask is not None:
+            th = 200
+            tw = int(mask.shape[1] * th / mask.shape[0])
+            thumb = cv2.resize(mask, (tw, th))
+            thumb_bgr = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR)
+            fh, fw = frame.shape[:2]
+            frame[fh - th:fh, 0:tw] = thumb_bgr
 
     # Tag axes
     if R is not None and t is not None:
