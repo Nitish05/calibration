@@ -36,10 +36,11 @@ HTML_PAGE = """
 
 
 class StreamServer:
-    def __init__(self, port=8080, title="Camera Stream"):
+    def __init__(self, port=8080, title="Camera Stream", stream_width=640):
         self.port = port
         self.title = title
         self.frame = None
+        self.stream_width = stream_width
         self.lock = threading.Lock()
         self.app = Flask(__name__)
         self.thread = None
@@ -58,7 +59,12 @@ class StreamServer:
                 if self.frame is None:
                     time.sleep(0.03)
                     continue
-                _, jpeg = cv2.imencode(".jpg", self.frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                frame = self.frame
+                h, w = frame.shape[:2]
+                if w > self.stream_width:
+                    scale = self.stream_width / w
+                    frame = cv2.resize(frame, (self.stream_width, int(h * scale)))
+                _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                 data = jpeg.tobytes()
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
             time.sleep(0.033)  # ~30 fps cap
