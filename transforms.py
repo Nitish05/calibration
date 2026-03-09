@@ -9,8 +9,8 @@ Z=0 board plane (relative to the AprilTag origin).
 import numpy as np
 
 # Camera intrinsics from calibration (Calib_board_outer.toml, 1920x1080)
-FX = 1510.838352442521
-FY = 1505.9514145965773
+FX = 1457.0856650406784
+FY = 1452.6623072550426
 CX = 959.5
 CY = 539.5
 

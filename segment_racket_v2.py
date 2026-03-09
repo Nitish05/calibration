@@ -40,10 +40,10 @@ ROI_HTML = """
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { background: #111; display: flex; flex-direction: column;
-               align-items: center; height: 100vh; font-family: monospace; overflow: hidden; }
-        h1 { color: #0f0; margin: 8px 0; font-size: 1.2em; }
-        .wrap { position: relative; display: inline-block; line-height: 0; }
-        .wrap img { display: block; max-width: 100vw; max-height: 88vh; }
+               align-items: center; height: 100vh; font-family: monospace; }
+        h1 { color: #0f0; margin: 4px 0; font-size: 1.1em; }
+        .wrap { position: relative; display: inline-block; line-height: 0; flex: 1; min-height: 0; }
+        .wrap img { display: block; max-width: 100vw; max-height: calc(100vh - 100px); }
         .wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
         #info { color: #0ff; font-size: 13px; margin-top: 6px; }
         #coord-tooltip {
