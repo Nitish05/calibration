@@ -36,7 +36,7 @@ HTML_PAGE = """
 
 
 class StreamServer:
-    def __init__(self, port=8080, title="Camera Stream", stream_width=640):
+    def __init__(self, port=8080, title="Camera Stream", stream_width=640, html=None):
         self.port = port
         self.title = title
         self.frame = None
@@ -44,10 +44,11 @@ class StreamServer:
         self.lock = threading.Lock()
         self.app = Flask(__name__)
         self.thread = None
+        self._html = html or HTML_PAGE
 
         @self.app.route("/")
         def index():
-            return render_template_string(HTML_PAGE, title=self.title)
+            return render_template_string(self._html, title=self.title)
 
         @self.app.route("/feed")
         def feed():

@@ -10,14 +10,189 @@ import argparse
 import csv
 import json
 import sys
+import threading
 
 import cv2
 import numpy as np
+from flask import request, jsonify
 from pupil_apriltags import Detector
 
 from camera import Camera
 from stream import StreamServer
 from transforms import FX, FY, CX, CY, TAG_SIZE, CAMERA_MATRIX, pixels_to_world
+
+# ---------------------------------------------------------------------------
+# Interactive HTML with draggable ROI overlay
+# ---------------------------------------------------------------------------
+ROI_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { background: #111; display: flex; flex-direction: column;
+               align-items: center; height: 100vh; font-family: monospace; overflow: hidden; }
+        h1 { color: #0f0; margin: 8px 0; font-size: 1.2em; }
+        .wrap { position: relative; display: inline-block; line-height: 0; }
+        .wrap img { display: block; max-width: 100vw; max-height: 88vh; }
+        .wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #info { color: #0ff; font-size: 13px; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <h1>{{ title }}</h1>
+    <div class="wrap">
+        <img id="stream" src="/feed">
+        <canvas id="overlay"></canvas>
+    </div>
+    <div id="info">Loading...</div>
+<script>
+const img = document.getElementById('stream');
+const canvas = document.getElementById('overlay');
+const ctx = canvas.getContext('2d');
+const info = document.getElementById('info');
+
+const CAM_W = 1920, CAM_H = 1080;
+const HANDLE = 10;
+
+let roi = {x:0, y:0, w:100, h:100};
+let drag = null;       // null | 'move' | 'nw'|'ne'|'sw'|'se'|'n'|'s'|'e'|'w'
+let dragStart = {};
+let roiStart = {};
+
+// --- coordinate helpers ---
+function s() { return img.clientWidth / CAM_W; }
+function toCanvas(px, py) { const sc=s(); return [px*sc, py*sc]; }
+function toCam(cx, cy) { const sc=s(); return [cx/sc, cy/sc]; }
+
+// --- fetch initial ROI ---
+fetch('/roi').then(r=>r.json()).then(d=>{ roi=d; draw(); });
+
+// --- drawing ---
+function draw() {
+    const sc = s();
+    canvas.width = img.clientWidth;
+    canvas.height = img.clientHeight;
+    const rx=roi.x*sc, ry=roi.y*sc, rw=roi.w*sc, rh=roi.h*sc;
+
+    // dim outside ROI
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.clearRect(rx, ry, rw, rh);
+
+    // ROI border
+    ctx.strokeStyle = '#0ff';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,4]);
+    ctx.strokeRect(rx, ry, rw, rh);
+    ctx.setLineDash([]);
+
+    // handles
+    ctx.fillStyle = '#0ff';
+    const hs = HANDLE;
+    const corners = [
+        [rx-hs/2, ry-hs/2],
+        [rx+rw-hs/2, ry-hs/2],
+        [rx-hs/2, ry+rh-hs/2],
+        [rx+rw-hs/2, ry+rh-hs/2],
+    ];
+    const mids = [
+        [rx+rw/2-hs/2, ry-hs/2],
+        [rx+rw/2-hs/2, ry+rh-hs/2],
+        [rx-hs/2, ry+rh/2-hs/2],
+        [rx+rw-hs/2, ry+rh/2-hs/2],
+    ];
+    [...corners, ...mids].forEach(([hx,hy]) => ctx.fillRect(hx, hy, hs, hs));
+
+    info.textContent = `ROI: x=${Math.round(roi.x)} y=${Math.round(roi.y)} w=${Math.round(roi.w)} h=${Math.round(roi.h)}  —  drag box to move, drag handles to resize`;
+}
+
+// --- hit test ---
+function hitTest(mx, my) {
+    const sc=s(), hs=HANDLE;
+    const rx=roi.x*sc, ry=roi.y*sc, rw=roi.w*sc, rh=roi.h*sc;
+    const near = (a,b) => Math.abs(a-b) < hs;
+
+    // corners
+    if (near(mx,rx) && near(my,ry)) return 'nw';
+    if (near(mx,rx+rw) && near(my,ry)) return 'ne';
+    if (near(mx,rx) && near(my,ry+rh)) return 'sw';
+    if (near(mx,rx+rw) && near(my,ry+rh)) return 'se';
+    // edges
+    if (near(my,ry) && mx>rx && mx<rx+rw) return 'n';
+    if (near(my,ry+rh) && mx>rx && mx<rx+rw) return 's';
+    if (near(mx,rx) && my>ry && my<ry+rh) return 'w';
+    if (near(mx,rx+rw) && my>ry && my<ry+rh) return 'e';
+    // inside
+    if (mx>rx && mx<rx+rw && my>ry && my<ry+rh) return 'move';
+    return null;
+}
+
+const cursors = {nw:'nw-resize',ne:'ne-resize',sw:'sw-resize',se:'se-resize',
+                 n:'n-resize',s:'s-resize',w:'w-resize',e:'e-resize',move:'grab'};
+
+// --- mouse events ---
+canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (!drag) {
+        const h = hitTest(mx, my);
+        canvas.style.cursor = h ? (cursors[h]||'default') : 'default';
+        return;
+    }
+    const dx = mx - dragStart.x, dy = my - dragStart.y;
+    const sc = s();
+    const dxC = dx/sc, dyC = dy/sc;
+
+    let {x,y,w,h} = roiStart;
+    if (drag==='move') { x+=dxC; y+=dyC; }
+    else {
+        if (drag.includes('w')) { x+=dxC; w-=dxC; }
+        if (drag.includes('e')) { w+=dxC; }
+        if (drag.includes('n')) { y+=dyC; h-=dyC; }
+        if (drag.includes('s')) { h+=dyC; }
+    }
+    // clamp
+    w = Math.max(50, w); h = Math.max(50, h);
+    x = Math.max(0, Math.min(x, CAM_W-w));
+    y = Math.max(0, Math.min(y, CAM_H-h));
+    roi = {x,y,w,h};
+    draw();
+});
+
+canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const h = hitTest(mx, my);
+    if (!h) return;
+    drag = h;
+    dragStart = {x: mx, y: my};
+    roiStart = {...roi};
+    if (h==='move') canvas.style.cursor = 'grabbing';
+});
+
+window.addEventListener('mouseup', () => {
+    if (drag) {
+        drag = null;
+        canvas.style.cursor = 'default';
+        // send to server
+        fetch('/roi', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({x:Math.round(roi.x), y:Math.round(roi.y),
+                                  w:Math.round(roi.w), h:Math.round(roi.h)})
+        });
+    }
+});
+
+// redraw on image load / resize
+img.addEventListener('load', draw);
+window.addEventListener('resize', draw);
+</script>
+</body>
+</html>
+"""
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -34,6 +209,12 @@ parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     default=[130, 100, 870, 620],
                     help="Region of interest (x y w h) in pixels — only segment inside this box")
 args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
+# Shared ROI state (thread-safe for Flask <-> main loop)
+# ---------------------------------------------------------------------------
+roi_lock = threading.Lock()
+shared_roi = list(args.roi)  # [x, y, w, h]
 
 # ---------------------------------------------------------------------------
 # AprilTag detector (same config as detect_apriltag.py)
@@ -53,7 +234,22 @@ detector = Detector(
 cap = Camera()
 stream = None
 if args.headless:
-    stream = StreamServer(port=args.port, title="Racket Segmentation")
+    stream = StreamServer(port=args.port, title="Racket Segmentation", html=ROI_HTML)
+
+    @stream.app.route("/roi", methods=["GET", "POST"])
+    def roi_endpoint():
+        global shared_roi
+        if request.method == "POST":
+            data = request.get_json()
+            with roi_lock:
+                shared_roi = [int(data["x"]), int(data["y"]),
+                              int(data["w"]), int(data["h"])]
+            print(f"ROI updated: {shared_roi}")
+            return jsonify(ok=True)
+        with roi_lock:
+            r = list(shared_roi)
+        return jsonify(x=r[0], y=r[1], w=r[2], h=r[3])
+
     stream.start()
 
 
@@ -189,8 +385,7 @@ def save_output(world_pts: np.ndarray, fmt: str, filename: str):
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
-roi = tuple(args.roi)
-print(f"Racket segmentation | epsilon={args.epsilon} | min_area={args.min_area} | roi={roi}")
+print(f"Racket segmentation | epsilon={args.epsilon} | min_area={args.min_area} | roi={list(shared_roi)}")
 print(f"Output: {args.output}.{args.format}")
 if args.continuous:
     save_key = "'s' to save" if not args.headless else "Ctrl+C to save last"
@@ -207,6 +402,10 @@ try:
         if not ret:
             print("Camera read failed")
             break
+
+        # Read current ROI (may be updated from web UI)
+        with roi_lock:
+            roi = tuple(shared_roi)
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         contour = segment_racket(frame, args.min_area, args.epsilon, roi=roi)
