@@ -3,6 +3,7 @@ import numpy as np
 import argparse
 from pupil_apriltags import Detector
 from stream import StreamServer
+from camera import Camera
 
 # Camera intrinsics from calibration
 FX = 1490.5559771045255
@@ -33,9 +34,7 @@ CAMERA_MATRIX = np.array([
     [0.0, 0.0, 1.0]
 ])
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap = Camera(width=1280, height=720)
 
 stream = None
 if args.headless:

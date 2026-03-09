@@ -10,6 +10,7 @@ import cv2
 import argparse
 import time
 from stream import StreamServer
+from camera import Camera
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--headless", action="store_true")
@@ -18,9 +19,7 @@ parser.add_argument("--duration", type=int, default=60, help="Recording duration
 parser.add_argument("--output", type=str, default="intrinsics/cam_00/intrinsics.mp4")
 args = parser.parse_args()
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+cap = Camera(width=1280, height=720)
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 out = cv2.VideoWriter(args.output, fourcc, 30.0, (1280, 720))
