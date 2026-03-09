@@ -445,7 +445,7 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
     # Initial fit on all contour points, then iteratively refit on head-only
     # points. Each pass the ellipse converges toward the true head shape.
     contour_pts = merged.reshape(-1, 2).astype(np.float64)
-    ellipse = cv2.fitEllipse(largest)
+    ellipse = cv2.fitEllipse(merged)
     MAX_ITERS = 5
 
     for iteration in range(MAX_ITERS):
