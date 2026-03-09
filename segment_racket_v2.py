@@ -23,8 +23,6 @@ import cv2
 import numpy as np
 from flask import request, jsonify
 from pupil_apriltags import Detector
-from scipy.interpolate import splprep, splev
-from scipy.ndimage import uniform_filter1d
 from scipy.spatial.distance import cdist
 
 from camera import Camera
@@ -376,40 +374,6 @@ def ellipse_point(t, cx, cy, w, h, angle_deg):
     return pts
 
 
-def point_to_ellipse_angle(px, py, cx, cy, w, h, angle_deg):
-    """Map a point to its nearest parametric angle on the ellipse.
-
-    Transforms the point into the ellipse's local frame, then uses atan2.
-    Returns angle in [0, 2*pi).
-    """
-    cos_a = np.cos(np.radians(angle_deg))
-    sin_a = np.sin(np.radians(angle_deg))
-    # Rotate into ellipse-local frame
-    dx = px - cx
-    dy = py - cy
-    local_x = dx * cos_a + dy * sin_a
-    local_y = -dx * sin_a + dy * cos_a
-    # Normalize by semi-axes to get angle
-    a, b = w / 2.0, h / 2.0
-    angle = np.arctan2(local_y / b, local_x / a)
-    if angle < 0:
-        angle += 2 * np.pi
-    return angle
-
-
-def smooth_contour_fallback(contour, num_points):
-    """Fit a periodic cubic spline through contour points and resample evenly.
-
-    Same as v1 smooth_contour — used as fallback when ellipse fit fails.
-    """
-    x = contour[:, 0, 0].astype(np.float64)
-    y = contour[:, 0, 1].astype(np.float64)
-    tck, _ = splprep([x, y], s=0, per=True, k=3)
-    u_new = np.linspace(0, 1, num_points)
-    x_new, y_new = splev(u_new, tck)
-    result = np.stack([x_new, y_new], axis=-1).round().astype(np.int32)
-    return result.reshape(-1, 1, 2)
-
 
 # ---------------------------------------------------------------------------
 # Segmentation (v2)
@@ -418,9 +382,9 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
                    open_kernel=9, close_kernel=15,
                    head_dist_thresh=20.0, min_head_ratio=0.4,
                    smooth_points=200, debug_vis=False):
-    """Segment racket using LAB thresholding + ellipse fit.
+    """Segment racket head using LAB thresholding + ellipse fit.
 
-    Returns the contour as (N, 1, 2) int32, or None.
+    Returns the head ellipse as a sampled contour (N, 1, 2) int32, or None.
     Coordinates are in full-frame space.
     """
     # Crop to ROI
@@ -466,203 +430,50 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
     if len(largest) < 5:
         return None
 
-    # --- Step 5: Fit ellipse to all contour points ---
+    # --- Step 5: Initial ellipse fit on all contour points ---
     ellipse_params = cv2.fitEllipse(largest)
     (ecx, ecy), (ew, eh), eangle = ellipse_params
 
     # --- Step 6: Classify head vs handle points ---
-    # Sample the fitted ellipse densely
-    ellipse_pts = sample_ellipse(ecx, ecy, ew, eh, eangle, 720)  # (720, 2)
-
-    # Contour points as (M, 2)
+    ellipse_pts = sample_ellipse(ecx, ecy, ew, eh, eangle, 720)
     contour_pts = largest.reshape(-1, 2).astype(np.float64)
-
-    # Min distance from each contour point to the ellipse
-    dists = cdist(contour_pts, ellipse_pts).min(axis=1)  # (M,)
+    dists = cdist(contour_pts, ellipse_pts).min(axis=1)
 
     head_mask = dists < head_dist_thresh
     head_ratio = head_mask.sum() / len(head_mask)
 
-    # --- Fallback: if ellipse fit is poor, use spline smoothing ---
-    if head_ratio < min_head_ratio:
-        if debug_vis:
-            with debug_info_lock:
-                shared_debug_info["ellipse"] = None
-                shared_debug_info["junctions"] = None
-                shared_debug_info["fallback"] = True
-        # Offset to full-frame
-        largest[:, :, 0] += ox
-        largest[:, :, 1] += oy
-        if smooth_points > 0 and len(largest) >= 4:
-            return smooth_contour_fallback(largest, smooth_points)
-        return largest
-
     # --- Step 7: Refit ellipse on head points only ---
     head_points = contour_pts[head_mask]
-    if len(head_points) < 5:
-        # Not enough head points, use initial ellipse
+
+    if head_ratio < min_head_ratio or len(head_points) < 5:
+        # Ellipse fit is poor — use the initial fit as-is
         head_ellipse = ellipse_params
+        if debug_vis:
+            with debug_info_lock:
+                shared_debug_info["ellipse"] = ellipse_params
+                shared_debug_info["head_ratio"] = head_ratio
+                shared_debug_info["fallback"] = True
     else:
         head_contour = head_points.reshape(-1, 1, 2).astype(np.int32)
         head_ellipse = cv2.fitEllipse(head_contour)
+        if debug_vis:
+            with debug_info_lock:
+                shared_debug_info["ellipse"] = head_ellipse
+                shared_debug_info["initial_ellipse"] = ellipse_params
+                shared_debug_info["head_ratio"] = head_ratio
+                shared_debug_info["fallback"] = False
 
     (hcx, hcy), (hw, hh), hangle = head_ellipse
 
-    # --- Step 8: Find junction points (head↔handle transitions) ---
-    # Smooth the boolean head_mask to remove noise
-    head_smooth = uniform_filter1d(head_mask.astype(np.float64), size=11, mode='wrap')
-    head_bool = head_smooth > 0.5
-
-    # Find transitions (head→handle and handle→head)
-    transitions = np.where(np.diff(head_bool.astype(int)) != 0)[0]
-
-    junction_a_idx = None
-    junction_b_idx = None
-
-    if len(transitions) >= 2:
-        # Pick the pair enclosing the longest non-head (handle) run
-        # Treat the array as circular
-        n_pts = len(head_bool)
-        best_gap = 0
-        best_pair = (transitions[0], transitions[1])
-
-        for i in range(len(transitions)):
-            t_start = transitions[i]
-            t_end = transitions[(i + 1) % len(transitions)]
-
-            # Calculate gap length (circular)
-            if t_end > t_start:
-                gap = t_end - t_start
-            else:
-                gap = (n_pts - t_start) + t_end
-
-            # Check if this gap is in the non-head region
-            mid_idx = (t_start + gap // 2) % n_pts
-            if not head_bool[mid_idx] and gap > best_gap:
-                best_gap = gap
-                best_pair = (t_start, t_end)
-
-        junction_a_idx = best_pair[0]
-        junction_b_idx = best_pair[1]
-    else:
-        # No clear transitions — entire contour is head (or handle)
-        # Fall back to spline
-        largest[:, :, 0] += ox
-        largest[:, :, 1] += oy
-        if smooth_points > 0 and len(largest) >= 4:
-            return smooth_contour_fallback(largest, smooth_points)
-        return largest
-
-    # --- Step 9: Stitch head ellipse arc + handle spline ---
-    # Junction points in contour coordinates
-    jA = contour_pts[junction_a_idx]
-    jB = contour_pts[junction_b_idx]
-
-    # Map junction points to ellipse parametric angles
-    angle_a = point_to_ellipse_angle(jA[0], jA[1], hcx, hcy, hw, hh, hangle)
-    angle_b = point_to_ellipse_angle(jB[0], jB[1], hcx, hcy, hw, hh, hangle)
-
-    # Head arc: go from angle_a to angle_b the "long way" (away from handle)
-    # The handle is between junction_a and junction_b in contour order.
-    # The head arc should go the other way around the ellipse.
-    # Determine which direction around the ellipse is "away from handle"
-    # by checking which arc contains the centroid of head points.
-    head_centroid = head_points.mean(axis=0)
-    head_centroid_angle = point_to_ellipse_angle(
-        head_centroid[0], head_centroid[1], hcx, hcy, hw, hh, hangle
-    )
-
-    # Arc from a→b going counterclockwise
-    if angle_b > angle_a:
-        arc_ccw = angle_b - angle_a
-    else:
-        arc_ccw = (2 * np.pi - angle_a) + angle_b
-
-    # Check if head centroid is in the ccw arc
-    def angle_in_arc(angle, start, arc_len):
-        """Check if angle is within arc starting at start going ccw for arc_len."""
-        diff = (angle - start) % (2 * np.pi)
-        return diff < arc_len
-
-    if angle_in_arc(head_centroid_angle, angle_a, arc_ccw):
-        # Head is in the ccw arc (a→b counterclockwise)
-        arc_start = angle_a
-        arc_length = arc_ccw
-    else:
-        # Head is in the cw arc (b→a counterclockwise, i.e., a→b clockwise)
-        arc_start = angle_b
-        arc_length = 2 * np.pi - arc_ccw
-
-    # Sample head arc — number of points proportional to arc length
-    a_semi, b_semi = hw / 2.0, hh / 2.0
-    # Approximate ellipse perimeter (Ramanujan)
-    ellipse_perim = np.pi * (3 * (a_semi + b_semi) - np.sqrt((3 * a_semi + b_semi) * (a_semi + 3 * b_semi)))
-    head_arc_frac = arc_length / (2 * np.pi)
-    head_arc_len = head_arc_frac * ellipse_perim
-
-    # Handle: extract contour points from junction_a to junction_b (the non-head run)
-    n_contour = len(contour_pts)
-    if junction_b_idx > junction_a_idx:
-        handle_indices = list(range(junction_a_idx, junction_b_idx + 1))
-    else:
-        handle_indices = list(range(junction_a_idx, n_contour)) + list(range(0, junction_b_idx + 1))
-    handle_pts = contour_pts[handle_indices]
-
-    # Compute handle arc length
-    handle_diffs = np.diff(handle_pts, axis=0)
-    handle_arc_len = np.sqrt((handle_diffs ** 2).sum(axis=1)).sum()
-
-    total_arc_len = head_arc_len + handle_arc_len
-
-    if smooth_points > 0:
-        n_head_pts = max(4, int(smooth_points * head_arc_len / total_arc_len))
-        n_handle_pts = max(4, smooth_points - n_head_pts)
-    else:
-        # No resampling requested — use proportional point counts
-        n_head_pts = max(4, int(len(contour_pts) * head_arc_frac))
-        n_handle_pts = max(4, len(handle_pts))
-
-    # Sample head arc from the refined ellipse
-    head_t = np.linspace(arc_start, arc_start + arc_length, n_head_pts, endpoint=False)
-    head_sampled = ellipse_point(head_t, hcx, hcy, hw, hh, hangle)
-
-    # Fit smoothing spline through handle points
-    if len(handle_pts) >= 4:
-        hx = handle_pts[:, 0]
-        hy = handle_pts[:, 1]
-        # s > 0 for smoothing (not interpolation)
-        s_val = len(handle_pts) * 2.0  # smoothing factor
-        try:
-            tck, _ = splprep([hx, hy], s=s_val, per=False, k=3)
-            u_new = np.linspace(0, 1, n_handle_pts)
-            hx_new, hy_new = splev(u_new, tck)
-            handle_sampled = np.stack([hx_new, hy_new], axis=-1)
-        except (ValueError, TypeError):
-            # Spline fit failed, use raw points evenly subsampled
-            idx = np.linspace(0, len(handle_pts) - 1, n_handle_pts).astype(int)
-            handle_sampled = handle_pts[idx]
-    else:
-        handle_sampled = handle_pts
-
-    # Stitch head + handle
-    stitched = np.vstack([head_sampled, handle_sampled])
-
-    # Store debug info
-    if debug_vis:
-        with debug_info_lock:
-            shared_debug_info["ellipse"] = head_ellipse
-            shared_debug_info["initial_ellipse"] = ellipse_params
-            shared_debug_info["junctions"] = (jA + np.array([ox, oy]),
-                                              jB + np.array([ox, oy]))
-            shared_debug_info["head_ratio"] = head_ratio
-            shared_debug_info["fallback"] = False
+    # --- Step 8: Sample the full head ellipse as output contour ---
+    n_pts = smooth_points if smooth_points > 0 else 360
+    sampled = sample_ellipse(hcx, hcy, hw, hh, hangle, n_pts)
 
     # Offset to full-frame coordinates
-    stitched[:, 0] += ox
-    stitched[:, 1] += oy
+    sampled[:, 0] += ox
+    sampled[:, 1] += oy
 
-    # Convert to OpenCV contour format (N, 1, 2) int32
-    result = stitched.round().astype(np.int32).reshape(-1, 1, 2)
+    result = sampled.round().astype(np.int32).reshape(-1, 1, 2)
     return result
 
 
@@ -712,17 +523,12 @@ def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
                         (int(ew / 2), int(eh / 2)),
                         eangle, 0, 360, (0, 255, 0), 1)
 
-        if di.get("junctions") is not None:
-            jA, jB = di["junctions"]
-            cv2.circle(frame, (int(jA[0]), int(jA[1])), 6, (0, 0, 255), -1)
-            cv2.circle(frame, (int(jB[0]), int(jB[1])), 6, (0, 0, 255), -1)
-
         if di.get("head_ratio") is not None:
             cv2.putText(frame, f"head: {di['head_ratio']:.0%}",
                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
         if di.get("fallback"):
-            cv2.putText(frame, "FALLBACK (spline)",
+            cv2.putText(frame, "FALLBACK (initial ellipse)",
                         (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
     # Tag axes
