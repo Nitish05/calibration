@@ -22,7 +22,7 @@ args = parser.parse_args()
 cap = Camera()
 
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(args.output, fourcc, 30.0, (640, 480))
+out = cv2.VideoWriter(args.output, fourcc, 15.0, (1920, 1080))
 
 stream = None
 if args.headless:
@@ -59,7 +59,7 @@ try:
         cv2.putText(display, f"REC {elapsed:.1f}s / {args.duration}s",
                     (50, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
         cv2.putText(display, "Move checkerboard slowly to all corners & angles",
-                    (10, 460), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    (10, 1060), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
         if args.headless:
             stream.update_frame(display)

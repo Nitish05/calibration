@@ -7,7 +7,7 @@ import cv2
 
 
 class Camera:
-    def __init__(self, width=640, height=480, device=0, use_picamera=False):
+    def __init__(self, width=1920, height=1080, device=0, use_picamera=False):
         self.width = width
         self.height = height
         self._picam2 = None
