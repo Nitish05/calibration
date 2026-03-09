@@ -434,40 +434,43 @@ def segment_racket(frame, min_area, roi=None, l_thresh=90,
     if len(largest) < 5:
         return None
 
-    # --- Step 5: Initial ellipse fit on all contour points ---
-    ellipse_params = cv2.fitEllipse(largest)
-    (ecx, ecy), (ew, eh), eangle = ellipse_params
-
-    # --- Step 6: Classify head vs handle points ---
-    ellipse_pts = sample_ellipse(ecx, ecy, ew, eh, eangle, 720)
+    # --- Step 5–7: Iterative ellipse fit ---
+    # Initial fit on all contour points, then iteratively refit on head-only
+    # points. Each pass the ellipse converges toward the true head shape.
     contour_pts = largest.reshape(-1, 2).astype(np.float64)
-    dists = cdist(contour_pts, ellipse_pts).min(axis=1)
+    ellipse = cv2.fitEllipse(largest)
+    MAX_ITERS = 5
 
-    head_mask = dists < head_dist_thresh
-    head_ratio = head_mask.sum() / len(head_mask)
+    for iteration in range(MAX_ITERS):
+        (ecx, ecy), (ew, eh), eangle = ellipse
+        ellipse_pts = sample_ellipse(ecx, ecy, ew, eh, eangle, 720)
+        dists = cdist(contour_pts, ellipse_pts).min(axis=1)
 
-    # --- Step 7: Refit ellipse on head points only ---
-    head_points = contour_pts[head_mask]
+        head_mask = dists < head_dist_thresh
+        head_points = contour_pts[head_mask]
+        head_ratio = head_mask.sum() / len(head_mask)
 
-    if head_ratio < min_head_ratio or len(head_points) < 5:
-        # Ellipse fit is poor — use the initial fit as-is
-        head_ellipse = ellipse_params
-        if debug_vis:
-            with debug_info_lock:
-                shared_debug_info["ellipse"] = ellipse_params
-                shared_debug_info["head_ratio"] = head_ratio
-                shared_debug_info["fallback"] = True
-    else:
-        head_contour = head_points.reshape(-1, 1, 2).astype(np.int32)
-        head_ellipse = cv2.fitEllipse(head_contour)
-        if debug_vis:
-            with debug_info_lock:
-                shared_debug_info["ellipse"] = head_ellipse
-                shared_debug_info["initial_ellipse"] = ellipse_params
-                shared_debug_info["head_ratio"] = head_ratio
-                shared_debug_info["fallback"] = False
+        if len(head_points) < 5:
+            break
 
-    (hcx, hcy), (hw, hh), hangle = head_ellipse
+        new_ellipse = cv2.fitEllipse(head_points.reshape(-1, 1, 2).astype(np.int32))
+
+        # Check convergence — if center moved less than 1px, stop
+        (ncx, ncy), _, _ = new_ellipse
+        if abs(ncx - ecx) < 1.0 and abs(ncy - ecy) < 1.0:
+            ellipse = new_ellipse
+            break
+
+        ellipse = new_ellipse
+
+    (hcx, hcy), (hw, hh), hangle = ellipse
+
+    if debug_vis:
+        with debug_info_lock:
+            shared_debug_info["ellipse"] = ellipse
+            shared_debug_info["head_ratio"] = head_ratio
+            shared_debug_info["fallback"] = head_ratio < min_head_ratio
+            shared_debug_info["iterations"] = iteration + 1
 
     # --- Step 8: Sample the full head ellipse as output contour ---
     n_pts = smooth_points if smooth_points > 0 else 360
@@ -528,12 +531,9 @@ def draw_overlay(frame, contour, R, t, world_pts, roi=None, debug_vis=False):
                         eangle, 0, 360, (0, 255, 0), 1)
 
         if di.get("head_ratio") is not None:
-            cv2.putText(frame, f"head: {di['head_ratio']:.0%}",
+            iters = di.get("iterations", "?")
+            cv2.putText(frame, f"head: {di['head_ratio']:.0%}  iters: {iters}",
                         (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        if di.get("fallback"):
-            cv2.putText(frame, "FALLBACK (initial ellipse)",
-                        (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         # Inset mask thumbnail in bottom-left corner
         mask = di.get("closed", di.get("dark_mask"))
