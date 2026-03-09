@@ -259,7 +259,7 @@ parser.add_argument("--format", choices=["csv", "json"], default="csv")
 parser.add_argument("--continuous", action="store_true", help="Live preview; press 's' to save or wait for Ctrl+C")
 parser.add_argument("--smooth-points", type=int, default=200,
                     help="Number of evenly-spaced points on the final contour (0 = raw stitched points)")
-parser.add_argument("--min-area", type=int, default=50000, help="Minimum contour area (px^2) to consider")
+parser.add_argument("--min-area", type=int, default=15000, help="Minimum contour area (px^2) to consider")
 parser.add_argument("--roi", type=int, nargs=4, metavar=("X", "Y", "W", "H"),
                     default=[130, 100, 870, 620],
                     help="Region of interest (x y w h) in pixels")
@@ -270,7 +270,7 @@ parser.add_argument("--l-thresh", type=int, default=90,
                     help="LAB L-channel threshold (pixels with L < this are 'dark'/frame)")
 parser.add_argument("--open-kernel", type=int, default=9,
                     help="Morph opening kernel diameter (> string width, < frame width)")
-parser.add_argument("--close-kernel", type=int, default=15,
+parser.add_argument("--close-kernel", type=int, default=25,
                     help="Morph closing kernel diameter (fills frame gaps)")
 parser.add_argument("--head-dist-thresh", type=float, default=20.0,
                     help="Max px distance from ellipse to classify as 'head'")
