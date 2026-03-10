@@ -379,8 +379,8 @@ setInterval(() => {
         }
         cncPos.style.color = '#0f0';
         cncPos.textContent = 'CNC [' + d.state + '] X:' +
-            d.mpos.x.toFixed(2) + ' Y:' + d.mpos.y.toFixed(2) +
-            ' Z:' + d.mpos.z.toFixed(2);
+            d.wpos.x.toFixed(2) + ' Y:' + d.wpos.y.toFixed(2) +
+            ' Z:' + d.wpos.z.toFixed(2);
 
         if (d.streaming) {
             cncProgress.textContent = 'Sending ' + d.progress + '/' + d.total + '...';
@@ -494,7 +494,7 @@ cnc_status_lock = threading.Lock()
 shared_cnc_status = {
     "connected": False,
     "state": "Unknown",
-    "mpos": {"x": 0.0, "y": 0.0, "z": 0.0},
+    "wpos": {"x": 0.0, "y": 0.0, "z": 0.0},
     "streaming": False,
     "progress": 0,
     "total": 0,
@@ -579,15 +579,28 @@ def cnc_query_status(ser):
             inner = resp[1:-1]
             parts = inner.split("|")
             state = parts[0]
-            mpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+            mpos = wpos = wco = None
             for p in parts[1:]:
                 if p.startswith("MPos:"):
-                    coords = p[5:].split(",")
-                    if len(coords) >= 3:
-                        mpos = {"x": float(coords[0]),
-                                "y": float(coords[1]),
-                                "z": float(coords[2])}
-            return {"state": state, "mpos": mpos}
+                    c = p[5:].split(",")
+                    if len(c) >= 3:
+                        mpos = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+                elif p.startswith("WPos:"):
+                    c = p[5:].split(",")
+                    if len(c) >= 3:
+                        wpos = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+                elif p.startswith("WCO:"):
+                    c = p[4:].split(",")
+                    if len(c) >= 3:
+                        wco = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+            # Compute wpos from mpos - wco if not directly reported
+            if wpos is None and mpos is not None and wco is not None:
+                wpos = {"x": mpos["x"] - wco["x"],
+                        "y": mpos["y"] - wco["y"],
+                        "z": mpos["z"] - wco["z"]}
+            if wpos is None:
+                wpos = mpos or {"x": 0.0, "y": 0.0, "z": 0.0}
+            return {"state": state, "wpos": wpos}
     return None
 
 
@@ -742,10 +755,10 @@ if args.headless:
                 result = cnc_query_status(cnc_serial)
                 if result:
                     status["state"] = result["state"]
-                    status["mpos"] = result["mpos"]
+                    status["wpos"] = result["wpos"]
                     with cnc_status_lock:
                         shared_cnc_status["state"] = result["state"]
-                        shared_cnc_status["mpos"] = result["mpos"]
+                        shared_cnc_status["wpos"] = result["wpos"]
             except Exception:
                 _cnc_mark_disconnected("Status query failed")
                 status["connected"] = False
