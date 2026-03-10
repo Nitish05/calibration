@@ -34,41 +34,25 @@ class Camera:
         print(f"Camera: OpenCV v4l2 device {device} ({width}x{height})")
 
     def _lock_controls(self):
-        """Lock C920 controls for consistent imaging."""
+        """Lock C920 controls for consistent imaging via OpenCV API."""
         if self._cap is None:
             return
-        import subprocess, time
-        dev = f"/dev/video{int(self._cap.get(cv2.CAP_PROP_POS_FRAMES)) or 0}"
-        # Find the actual device path
-        try:
-            backend = self._cap.getBackendName()
-        except Exception:
-            pass
         # Read a few frames to let the camera initialize
         for _ in range(5):
             self._cap.read()
-        time.sleep(0.5)
-        controls = [
-            ("focus_automatic_continuous", "0"),
-            ("focus_absolute", "35"),
-            ("white_balance_automatic", "0"),
-            ("white_balance_temperature", "4195"),
-            ("auto_exposure", "1"),
-            ("exposure_time_absolute", "329"),
-            ("exposure_dynamic_framerate", "0"),
-            ("gain", "66"),
-            ("sharpness", "128"),
-        ]
-        for ctrl, val in controls:
-            try:
-                subprocess.run(
-                    ["v4l2-ctl", "-d", "/dev/video0", f"--set-ctrl={ctrl}={val}"],
-                    capture_output=True, timeout=2,
-                )
-                if ctrl in ("focus_automatic_continuous", "white_balance_automatic", "auto_exposure"):
-                    time.sleep(0.3)
-            except Exception:
-                pass
+        # Disable auto modes first
+        self._cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+        self._cap.set(cv2.CAP_PROP_AUTO_WB, 0)
+        self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 1=manual, 3=auto
+        # Then set manual values
+        self._cap.set(cv2.CAP_PROP_FOCUS, 35)
+        self._cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4195)
+        self._cap.set(cv2.CAP_PROP_EXPOSURE, 329)
+        self._cap.set(cv2.CAP_PROP_GAIN, 66)
+        self._cap.set(cv2.CAP_PROP_SHARPNESS, 128)
+        self._cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)
+        self._cap.set(cv2.CAP_PROP_CONTRAST, 128)
+        self._cap.set(cv2.CAP_PROP_SATURATION, 128)
 
     def read(self):
         if self._picam2 is not None:
