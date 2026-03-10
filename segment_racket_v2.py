@@ -516,11 +516,11 @@ def compute_offset_path(world_pts, offset_mm):
     dots = np.sum(normals * to_center, axis=1)
     normals[dots > 0] *= -1
 
-    # Camera faces inward for positive offset, outward for negative
+    # Camera faces outward for positive offset, inward for negative
     if offset_mm >= 0:
-        cam_dir = -normals  # toward center
-    else:
         cam_dir = normals   # away from center
+    else:
+        cam_dir = -normals  # toward center
 
     heading_rad = np.arctan2(cam_dir[:, 1], cam_dir[:, 0])
     heading_rad = np.unwrap(heading_rad)  # smooth out 360° jumps
