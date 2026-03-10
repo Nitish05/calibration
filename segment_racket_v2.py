@@ -501,6 +501,11 @@ shared_cnc_status = {
 shared_cnc_stop = False
 
 # ---------------------------------------------------------------------------
+# Connect to CNC before camera (serial open can reset USB hub)
+# ---------------------------------------------------------------------------
+cnc_connect(args.serial_port, args.baud_rate)
+
+# ---------------------------------------------------------------------------
 # AprilTag detector
 # ---------------------------------------------------------------------------
 detector = Detector(
@@ -854,10 +859,6 @@ def cnc_stream_gcode(gcode_str):
         with cnc_status_lock:
             shared_cnc_status["streaming"] = False
         shared_cnc_stop = False
-
-
-# Connect to CNC at startup (non-blocking — app works without it)
-cnc_connect(args.serial_port, args.baud_rate)
 
 
 # ---------------------------------------------------------------------------
