@@ -501,8 +501,118 @@ shared_cnc_status = {
 shared_cnc_stop = False
 
 # ---------------------------------------------------------------------------
-# Connect to CNC before camera (serial open can reset USB hub)
+# CNC serial helpers
 # ---------------------------------------------------------------------------
+def cnc_connect(port, baud):
+    """Open serial connection to Grbl CNC controller."""
+    global cnc_serial
+    try:
+        import serial
+    except ImportError:
+        print("[CNC] pyserial not installed — CNC control disabled")
+        return
+    try:
+        ser = serial.Serial(port, baud, timeout=2)
+        import time
+        time.sleep(2)  # wait for Grbl boot
+        ser.reset_input_buffer()
+        ser.write(b"\x18")  # soft reset
+        time.sleep(0.5)
+        ser.reset_input_buffer()
+        with cnc_lock:
+            cnc_serial = ser
+        with cnc_status_lock:
+            shared_cnc_status["connected"] = True
+            shared_cnc_status["error"] = None
+        print(f"[CNC] Connected to {port} @ {baud}")
+    except Exception as e:
+        print(f"[CNC] Failed to connect to {port}: {e}")
+        with cnc_status_lock:
+            shared_cnc_status["error"] = str(e)
+
+
+def cnc_send_line(ser, line):
+    """Send one G-code line and wait for ok/error response."""
+    line = line.strip()
+    if not line or line.startswith(";") or line.startswith("("):
+        return True
+    ser.write((line + "\n").encode())
+    while True:
+        resp = ser.readline().decode("ascii", errors="replace").strip()
+        if not resp:
+            continue
+        if resp.startswith("<"):
+            continue  # status response, ignore
+        if resp == "ok":
+            return True
+        if resp.startswith("error"):
+            return resp
+    return True
+
+
+def cnc_query_status(ser):
+    """Send ? real-time command and parse Grbl status response."""
+    ser.write(b"?")
+    import time
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        resp = ser.readline().decode("ascii", errors="replace").strip()
+        if resp.startswith("<") and resp.endswith(">"):
+            inner = resp[1:-1]
+            parts = inner.split("|")
+            state = parts[0]
+            mpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+            for p in parts[1:]:
+                if p.startswith("MPos:"):
+                    coords = p[5:].split(",")
+                    if len(coords) >= 3:
+                        mpos = {"x": float(coords[0]),
+                                "y": float(coords[1]),
+                                "z": float(coords[2])}
+            return {"state": state, "mpos": mpos}
+    return None
+
+
+def cnc_stream_gcode(gcode_str):
+    """Stream G-code to CNC in a background thread."""
+    global shared_cnc_stop
+    lines = [l.strip() for l in gcode_str.split("\n")
+             if l.strip() and not l.strip().startswith(";") and not l.strip().startswith("(")]
+    total = len(lines)
+
+    with cnc_status_lock:
+        shared_cnc_status["streaming"] = True
+        shared_cnc_status["progress"] = 0
+        shared_cnc_status["total"] = total
+        shared_cnc_status["error"] = None
+
+    try:
+        for i, line in enumerate(lines):
+            if shared_cnc_stop:
+                with cnc_status_lock:
+                    shared_cnc_status["error"] = "Stopped by user"
+                break
+
+            with cnc_lock:
+                result = cnc_send_line(cnc_serial, line)
+
+            if result is not True:
+                with cnc_status_lock:
+                    shared_cnc_status["error"] = f"Line {i+1}: {result}"
+                break
+
+            with cnc_status_lock:
+                shared_cnc_status["progress"] = i + 1
+    except Exception as e:
+        with cnc_status_lock:
+            shared_cnc_status["error"] = str(e)
+    finally:
+        with cnc_status_lock:
+            shared_cnc_status["streaming"] = False
+        shared_cnc_stop = False
+
+
+# Connect to CNC before camera (serial open can reset USB hub)
 cnc_connect(args.serial_port, args.baud_rate)
 
 # ---------------------------------------------------------------------------
@@ -745,120 +855,6 @@ def generate_gcode(offset_pts, feed_rate=1000.0, heading_deg=None):
     lines.append(f"G1 X{offset_pts[0, 0]:.2f} Y{offset_pts[0, 1]:.2f}{_rot(0)} ; close loop")
     lines.append("M2")
     return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# CNC serial helpers
-# ---------------------------------------------------------------------------
-def cnc_connect(port, baud):
-    """Open serial connection to Grbl CNC controller."""
-    global cnc_serial
-    try:
-        import serial
-    except ImportError:
-        print("[CNC] pyserial not installed — CNC control disabled")
-        return
-    try:
-        ser = serial.Serial(port, baud, timeout=2)
-        import time
-        time.sleep(2)  # wait for Grbl boot
-        ser.reset_input_buffer()
-        ser.write(b"\x18")  # soft reset
-        time.sleep(0.5)
-        ser.reset_input_buffer()
-        with cnc_lock:
-            cnc_serial = ser
-        with cnc_status_lock:
-            shared_cnc_status["connected"] = True
-            shared_cnc_status["error"] = None
-        print(f"[CNC] Connected to {port} @ {baud}")
-    except Exception as e:
-        print(f"[CNC] Failed to connect to {port}: {e}")
-        with cnc_status_lock:
-            shared_cnc_status["error"] = str(e)
-
-
-def cnc_send_line(ser, line):
-    """Send one G-code line and wait for ok/error response."""
-    line = line.strip()
-    if not line or line.startswith(";") or line.startswith("("):
-        return True
-    ser.write((line + "\n").encode())
-    while True:
-        resp = ser.readline().decode("ascii", errors="replace").strip()
-        if not resp:
-            continue
-        if resp.startswith("<"):
-            continue  # status response, ignore
-        if resp == "ok":
-            return True
-        if resp.startswith("error"):
-            return resp
-    return True
-
-
-def cnc_query_status(ser):
-    """Send ? real-time command and parse Grbl status response."""
-    ser.write(b"?")
-    deadline = None
-    import time
-    deadline = time.time() + 1.0
-    while time.time() < deadline:
-        resp = ser.readline().decode("ascii", errors="replace").strip()
-        if resp.startswith("<") and resp.endswith(">"):
-            # Parse e.g. <Idle|MPos:0.000,0.000,0.000|...>
-            inner = resp[1:-1]
-            parts = inner.split("|")
-            state = parts[0]
-            mpos = {"x": 0.0, "y": 0.0, "z": 0.0}
-            for p in parts[1:]:
-                if p.startswith("MPos:"):
-                    coords = p[5:].split(",")
-                    if len(coords) >= 3:
-                        mpos = {"x": float(coords[0]),
-                                "y": float(coords[1]),
-                                "z": float(coords[2])}
-            return {"state": state, "mpos": mpos}
-    return None
-
-
-def cnc_stream_gcode(gcode_str):
-    """Stream G-code to CNC in a background thread."""
-    global shared_cnc_stop
-    lines = [l.strip() for l in gcode_str.split("\n")
-             if l.strip() and not l.strip().startswith(";") and not l.strip().startswith("(")]
-    total = len(lines)
-
-    with cnc_status_lock:
-        shared_cnc_status["streaming"] = True
-        shared_cnc_status["progress"] = 0
-        shared_cnc_status["total"] = total
-        shared_cnc_status["error"] = None
-
-    try:
-        for i, line in enumerate(lines):
-            if shared_cnc_stop:
-                with cnc_status_lock:
-                    shared_cnc_status["error"] = "Stopped by user"
-                break
-
-            with cnc_lock:
-                result = cnc_send_line(cnc_serial, line)
-
-            if result is not True:
-                with cnc_status_lock:
-                    shared_cnc_status["error"] = f"Line {i+1}: {result}"
-                break
-
-            with cnc_status_lock:
-                shared_cnc_status["progress"] = i + 1
-    except Exception as e:
-        with cnc_status_lock:
-            shared_cnc_status["error"] = str(e)
-    finally:
-        with cnc_status_lock:
-            shared_cnc_status["streaming"] = False
-        shared_cnc_stop = False
 
 
 # ---------------------------------------------------------------------------
