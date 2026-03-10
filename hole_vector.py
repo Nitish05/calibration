@@ -219,6 +219,16 @@ def index():
     return INDEX_HTML
 
 
+@app.route("/stream")
+def stream_proxy():
+    """Proxy the Pi MJPEG stream to avoid cross-origin issues."""
+    def generate():
+        resp = requests.get(f"{PI_URL}/stream", stream=True, timeout=10)
+        for chunk in resp.iter_content(chunk_size=4096):
+            yield chunk
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
 @app.route("/capture", methods=["POST"])
 def do_capture():
     body = request.get_json(force=True)
@@ -452,8 +462,7 @@ INDEX_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const PI_URL = '""" + PI_URL + """';
-document.getElementById('live-feed').src = PI_URL + '/stream';
+document.getElementById('live-feed').src = '/stream';
 
 const threshSlider = document.getElementById('threshold');
 const threshVal = document.getElementById('thresh-val');
