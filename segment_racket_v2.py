@@ -72,7 +72,7 @@ ROI_HTML = """
     <div id="info">Loading...</div>
     <div id="controls">
         <label>Offset (mm):
-            <input type="range" id="offset" min="-20" max="20" value="5" step="0.5">
+            <input type="range" id="offset" min="-100" max="100" value="5" step="0.5">
             <span class="val" id="offset_val">5.0</span>
         </label>
         <button id="gen-gcode">Generate G-code</button>
@@ -799,7 +799,7 @@ last_world_pts = None
 # Local mode: offset trackbar (0–40 maps to -20..+20 mm)
 if not args.headless:
     cv2.namedWindow("Racket Segmentation v2")
-    _offset_center = 20
+    _offset_center = 100
 
     def _offset_cb(val):
         global shared_offset_mm
@@ -807,7 +807,7 @@ if not args.headless:
             shared_offset_mm = float(val - _offset_center)
 
     cv2.createTrackbar("Offset mm", "Racket Segmentation v2",
-                       int(args.offset) + _offset_center, 40, _offset_cb)
+                       int(args.offset) + _offset_center, 200, _offset_cb)
 
 try:
     while True:
