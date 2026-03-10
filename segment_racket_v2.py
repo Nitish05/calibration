@@ -504,6 +504,51 @@ shared_cnc_stop = False
 shared_cnc_wco = {"x": 0.0, "y": 0.0, "z": 0.0}  # cached work coordinate offset
 
 # ---------------------------------------------------------------------------
+# Auto-detect devices
+# ---------------------------------------------------------------------------
+def find_serial_port():
+    """Find the CNC serial port by scanning available USB serial devices."""
+    try:
+        import serial.tools.list_ports
+    except ImportError:
+        return None
+    for port in serial.tools.list_ports.comports():
+        # CH340 is the MKS DLC32's USB-serial chip
+        if "CH340" in (port.description or "") or "CH340" in (port.manufacturer or ""):
+            print(f"[CNC] Auto-detected serial port: {port.device} ({port.description})")
+            return port.device
+    # Fallback: return first ttyUSB or ttyACM device
+    for port in serial.tools.list_ports.comports():
+        if "ttyUSB" in port.device or "ttyACM" in port.device:
+            print(f"[CNC] Auto-detected serial port: {port.device} ({port.description})")
+            return port.device
+    return None
+
+
+def find_camera_device(name="C920"):
+    """Find video device index for a camera by name using v4l2."""
+    import subprocess
+    try:
+        result = subprocess.run(["v4l2-ctl", "--list-devices"],
+                                capture_output=True, text=True, timeout=5)
+        lines = result.stdout.split("\n")
+        for i, line in enumerate(lines):
+            if name in line:
+                # Next non-empty line(s) are the /dev/videoN paths; take the first
+                for dev_line in lines[i + 1:]:
+                    dev_line = dev_line.strip()
+                    if not dev_line:
+                        break
+                    if dev_line.startswith("/dev/video"):
+                        idx = int(dev_line.replace("/dev/video", ""))
+                        print(f"[Camera] Auto-detected {name} at /dev/video{idx}")
+                        return idx
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
 # CNC serial helpers
 # ---------------------------------------------------------------------------
 def cnc_connect(port, baud):
@@ -672,7 +717,13 @@ def cnc_stream_gcode(gcode_str):
 
 
 # Connect to CNC before camera (serial open can reset USB hub)
-cnc_connect(args.serial_port, args.baud_rate)
+_cnc_port = args.serial_port
+if not __import__("os").path.exists(_cnc_port):
+    _cnc_port = find_serial_port()
+if _cnc_port:
+    cnc_connect(_cnc_port, args.baud_rate)
+else:
+    print("[CNC] No serial port found — CNC control disabled")
 
 # ---------------------------------------------------------------------------
 # AprilTag detector
@@ -689,7 +740,13 @@ detector = Detector(
 # ---------------------------------------------------------------------------
 # Camera + stream
 # ---------------------------------------------------------------------------
-cap = Camera(device=args.camera_device)
+_cam_device = args.camera_device
+if _cam_device == 0:
+    # Auto-detect if user didn't specify a device
+    _auto = find_camera_device("C920")
+    if _auto is not None:
+        _cam_device = _auto
+cap = Camera(device=_cam_device)
 stream = None
 if args.headless:
     stream = StreamServer(port=args.port, title="Racket Segmentation v2", html=ROI_HTML)
