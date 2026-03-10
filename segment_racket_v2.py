@@ -61,6 +61,17 @@ ROI_HTML = """
                            border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 13px; }
         #controls button:hover { background: #c0c; }
         #gcode-status { font-size: 12px; }
+        #cnc-panel { color: #ddd; font-size: 13px; margin-top: 6px;
+                     display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        #cnc-panel button { background: #a0a; color: #fff; border: none; padding: 5px 14px;
+                            border-radius: 3px; cursor: pointer; font-family: monospace; font-size: 13px; }
+        #cnc-panel button:hover { background: #c0c; }
+        #cnc-panel button.danger { background: #a00; }
+        #cnc-panel button.danger:hover { background: #c00; }
+        #cnc-panel button:disabled { opacity: 0.4; cursor: default; }
+        #cnc-pos { color: #0f0; }
+        #cnc-progress { color: #ff0; }
+        #cnc-error { color: #f44; }
     </style>
 </head>
 <body>
@@ -77,6 +88,14 @@ ROI_HTML = """
         </label>
         <button id="gen-gcode">Generate G-code</button>
         <span id="gcode-status"></span>
+    </div>
+    <div id="cnc-panel">
+        <span id="cnc-pos">CNC: --</span>
+        <button id="send-cnc">Send to CNC</button>
+        <button id="stop-cnc" class="danger" disabled>Stop</button>
+        <button id="reset-cnc">Reset</button>
+        <span id="cnc-progress"></span>
+        <span id="cnc-error"></span>
     </div>
     <div id="coord-tooltip"></div>
 <script>
@@ -304,6 +323,87 @@ gcodeBtn.addEventListener('click', () => {
         setTimeout(() => gcodeStatus.textContent = '', 4000);
     });
 });
+
+// --- CNC panel ---
+const cncPos = document.getElementById('cnc-pos');
+const sendCncBtn = document.getElementById('send-cnc');
+const stopCncBtn = document.getElementById('stop-cnc');
+const resetCncBtn = document.getElementById('reset-cnc');
+const cncProgress = document.getElementById('cnc-progress');
+const cncError = document.getElementById('cnc-error');
+
+sendCncBtn.addEventListener('click', () => {
+    sendCncBtn.disabled = true;
+    cncError.textContent = '';
+    cncProgress.textContent = 'Starting...';
+    fetch('/cnc/send', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+        if (d.error) {
+            cncError.textContent = d.error;
+            cncProgress.textContent = '';
+            sendCncBtn.disabled = false;
+        } else {
+            stopCncBtn.disabled = false;
+        }
+    })
+    .catch(e => {
+        cncError.textContent = e.message;
+        cncProgress.textContent = '';
+        sendCncBtn.disabled = false;
+    });
+});
+
+stopCncBtn.addEventListener('click', () => {
+    fetch('/cnc/stop', {method: 'POST'});
+});
+
+resetCncBtn.addEventListener('click', () => {
+    fetch('/cnc/reset', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+        if (!d.error) {
+            cncError.textContent = '';
+            cncProgress.textContent = '';
+        }
+    });
+});
+
+setInterval(() => {
+    fetch('/cnc/status').then(r => r.json()).then(d => {
+        if (!d.connected) {
+            cncPos.textContent = 'CNC: disconnected';
+            cncPos.style.color = '#666';
+            sendCncBtn.disabled = true;
+            return;
+        }
+        cncPos.style.color = '#0f0';
+        cncPos.textContent = 'CNC [' + d.state + '] X:' +
+            d.mpos.x.toFixed(2) + ' Y:' + d.mpos.y.toFixed(2) +
+            ' Z:' + d.mpos.z.toFixed(2);
+
+        if (d.streaming) {
+            cncProgress.textContent = 'Sending ' + d.progress + '/' + d.total + '...';
+            sendCncBtn.disabled = true;
+            stopCncBtn.disabled = false;
+        } else {
+            stopCncBtn.disabled = true;
+            sendCncBtn.disabled = false;
+            if (d.total > 0 && d.progress >= d.total && !d.error) {
+                cncProgress.textContent = 'Done!';
+                setTimeout(() => { cncProgress.textContent = ''; }, 3000);
+            } else if (!d.error) {
+                cncProgress.textContent = '';
+            }
+        }
+
+        if (d.error) {
+            cncError.textContent = d.error;
+        } else {
+            cncError.textContent = '';
+        }
+    }).catch(() => {});
+}, 500);
 </script>
 </body>
 </html>
@@ -359,6 +459,10 @@ parser.add_argument("--feed-rate", type=float, default=1000.0,
                     help="G-code feed rate in mm/min")
 parser.add_argument("--gcode-output", type=str, default="racket_path.gcode",
                     help="G-code output filename")
+parser.add_argument("--serial-port", type=str, default="/dev/ttyUSB0",
+                    help="Serial port for CNC controller")
+parser.add_argument("--baud-rate", type=int, default=115200,
+                    help="Serial baud rate for CNC controller")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -379,6 +483,22 @@ offset_lock = threading.Lock()
 shared_offset_mm = args.offset
 shared_offset_world = None  # latest (N, 2) offset world points for G-code
 shared_offset_heading = None  # latest (N,) heading angles in degrees for G-code
+
+# CNC serial state
+cnc_lock = threading.Lock()
+cnc_serial = None
+
+cnc_status_lock = threading.Lock()
+shared_cnc_status = {
+    "connected": False,
+    "state": "Unknown",
+    "mpos": {"x": 0.0, "y": 0.0, "z": 0.0},
+    "streaming": False,
+    "progress": 0,
+    "total": 0,
+    "error": None,
+}
+shared_cnc_stop = False
 
 # ---------------------------------------------------------------------------
 # AprilTag detector
@@ -456,6 +576,78 @@ if args.headless:
         buf.seek(0)
         return send_file(buf, mimetype="text/plain",
                          as_attachment=True, download_name=args.gcode_output)
+
+    @stream.app.route("/cnc/send", methods=["POST"])
+    def cnc_send_endpoint():
+        global shared_cnc_stop
+        with cnc_status_lock:
+            if not shared_cnc_status["connected"]:
+                return jsonify(error="CNC not connected"), 400
+            if shared_cnc_status["streaming"]:
+                return jsonify(error="Already streaming"), 400
+        with offset_lock:
+            pts = shared_offset_world
+            hdg = shared_offset_heading
+        if pts is None:
+            return jsonify(error="No offset path yet (need tag + contour)"), 400
+        gcode = generate_gcode(pts, feed_rate=args.feed_rate, heading_deg=hdg)
+        shared_cnc_stop = False
+        t = threading.Thread(target=cnc_stream_gcode, args=(gcode,), daemon=True)
+        t.start()
+        return jsonify(ok=True, total=len([l for l in gcode.split("\n")
+                       if l.strip() and not l.strip().startswith(";")]))
+
+    @stream.app.route("/cnc/status", methods=["GET"])
+    def cnc_status_endpoint():
+        with cnc_status_lock:
+            status = dict(shared_cnc_status)
+        # Try to get fresh position if not streaming
+        if status["connected"] and cnc_lock.acquire(timeout=0.2):
+            try:
+                result = cnc_query_status(cnc_serial)
+                if result:
+                    status["state"] = result["state"]
+                    status["mpos"] = result["mpos"]
+                    with cnc_status_lock:
+                        shared_cnc_status["state"] = result["state"]
+                        shared_cnc_status["mpos"] = result["mpos"]
+            finally:
+                cnc_lock.release()
+        return jsonify(status)
+
+    @stream.app.route("/cnc/stop", methods=["POST"])
+    def cnc_stop_endpoint():
+        global shared_cnc_stop
+        shared_cnc_stop = True
+        # Send feed hold if connected
+        if cnc_lock.acquire(timeout=0.5):
+            try:
+                if cnc_serial:
+                    cnc_serial.write(b"!")
+            finally:
+                cnc_lock.release()
+        return jsonify(ok=True)
+
+    @stream.app.route("/cnc/reset", methods=["POST"])
+    def cnc_reset_endpoint():
+        global shared_cnc_stop
+        shared_cnc_stop = False
+        if cnc_lock.acquire(timeout=1.0):
+            try:
+                if cnc_serial:
+                    cnc_serial.write(b"\x18")
+                    import time
+                    time.sleep(0.5)
+                    cnc_serial.reset_input_buffer()
+                with cnc_status_lock:
+                    shared_cnc_status["error"] = None
+                    shared_cnc_status["streaming"] = False
+                    shared_cnc_status["progress"] = 0
+                    shared_cnc_status["total"] = 0
+                return jsonify(ok=True)
+            finally:
+                cnc_lock.release()
+        return jsonify(error="Could not acquire serial lock"), 500
 
     stream.start()
 
@@ -548,6 +740,124 @@ def generate_gcode(offset_pts, feed_rate=1000.0, heading_deg=None):
     lines.append(f"G1 X{offset_pts[0, 0]:.2f} Y{offset_pts[0, 1]:.2f}{_rot(0)} ; close loop")
     lines.append("M2")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# CNC serial helpers
+# ---------------------------------------------------------------------------
+def cnc_connect(port, baud):
+    """Open serial connection to Grbl CNC controller."""
+    global cnc_serial
+    try:
+        import serial
+    except ImportError:
+        print("[CNC] pyserial not installed — CNC control disabled")
+        return
+    try:
+        ser = serial.Serial(port, baud, timeout=2)
+        import time
+        time.sleep(2)  # wait for Grbl boot
+        ser.reset_input_buffer()
+        ser.write(b"\x18")  # soft reset
+        time.sleep(0.5)
+        ser.reset_input_buffer()
+        with cnc_lock:
+            cnc_serial = ser
+        with cnc_status_lock:
+            shared_cnc_status["connected"] = True
+            shared_cnc_status["error"] = None
+        print(f"[CNC] Connected to {port} @ {baud}")
+    except Exception as e:
+        print(f"[CNC] Failed to connect to {port}: {e}")
+        with cnc_status_lock:
+            shared_cnc_status["error"] = str(e)
+
+
+def cnc_send_line(ser, line):
+    """Send one G-code line and wait for ok/error response."""
+    line = line.strip()
+    if not line or line.startswith(";") or line.startswith("("):
+        return True
+    ser.write((line + "\n").encode())
+    while True:
+        resp = ser.readline().decode("ascii", errors="replace").strip()
+        if not resp:
+            continue
+        if resp.startswith("<"):
+            continue  # status response, ignore
+        if resp == "ok":
+            return True
+        if resp.startswith("error"):
+            return resp
+    return True
+
+
+def cnc_query_status(ser):
+    """Send ? real-time command and parse Grbl status response."""
+    ser.write(b"?")
+    deadline = None
+    import time
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        resp = ser.readline().decode("ascii", errors="replace").strip()
+        if resp.startswith("<") and resp.endswith(">"):
+            # Parse e.g. <Idle|MPos:0.000,0.000,0.000|...>
+            inner = resp[1:-1]
+            parts = inner.split("|")
+            state = parts[0]
+            mpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+            for p in parts[1:]:
+                if p.startswith("MPos:"):
+                    coords = p[5:].split(",")
+                    if len(coords) >= 3:
+                        mpos = {"x": float(coords[0]),
+                                "y": float(coords[1]),
+                                "z": float(coords[2])}
+            return {"state": state, "mpos": mpos}
+    return None
+
+
+def cnc_stream_gcode(gcode_str):
+    """Stream G-code to CNC in a background thread."""
+    global shared_cnc_stop
+    lines = [l.strip() for l in gcode_str.split("\n")
+             if l.strip() and not l.strip().startswith(";") and not l.strip().startswith("(")]
+    total = len(lines)
+
+    with cnc_status_lock:
+        shared_cnc_status["streaming"] = True
+        shared_cnc_status["progress"] = 0
+        shared_cnc_status["total"] = total
+        shared_cnc_status["error"] = None
+
+    try:
+        for i, line in enumerate(lines):
+            if shared_cnc_stop:
+                with cnc_status_lock:
+                    shared_cnc_status["error"] = "Stopped by user"
+                break
+
+            with cnc_lock:
+                result = cnc_send_line(cnc_serial, line)
+
+            if result is not True:
+                with cnc_status_lock:
+                    shared_cnc_status["error"] = f"Line {i+1}: {result}"
+                break
+
+            with cnc_status_lock:
+                shared_cnc_status["progress"] = i + 1
+    except Exception as e:
+        with cnc_status_lock:
+            shared_cnc_status["error"] = str(e)
+    finally:
+        with cnc_status_lock:
+            shared_cnc_status["streaming"] = False
+        shared_cnc_stop = False
+
+
+# Connect to CNC at startup (non-blocking — app works without it)
+cnc_connect(args.serial_port, args.baud_rate)
 
 
 # ---------------------------------------------------------------------------
