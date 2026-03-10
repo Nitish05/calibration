@@ -47,7 +47,7 @@ class Camera:
         # Then set manual values
         self._cap.set(cv2.CAP_PROP_FOCUS, 35)
         self._cap.set(cv2.CAP_PROP_WB_TEMPERATURE, 4195)
-        self._cap.set(cv2.CAP_PROP_EXPOSURE, 329)
+        self._cap.set(cv2.CAP_PROP_EXPOSURE, 312)
         self._cap.set(cv2.CAP_PROP_GAIN, 66)
         self._cap.set(cv2.CAP_PROP_SHARPNESS, 128)
         self._cap.set(cv2.CAP_PROP_BRIGHTNESS, 128)
