@@ -533,6 +533,14 @@ def cnc_connect(port, baud):
             shared_cnc_status["error"] = str(e)
 
 
+def _cnc_mark_disconnected(reason="Serial I/O error"):
+    """Mark CNC as disconnected after a serial failure."""
+    with cnc_status_lock:
+        shared_cnc_status["connected"] = False
+        shared_cnc_status["error"] = reason
+    print(f"[CNC] Disconnected: {reason}")
+
+
 def cnc_send_line(ser, line):
     """Send one G-code line and wait for ok/error response."""
     line = line.strip()
@@ -554,11 +562,19 @@ def cnc_send_line(ser, line):
 
 def cnc_query_status(ser):
     """Send ? real-time command and parse Grbl status response."""
-    ser.write(b"?")
+    try:
+        ser.write(b"?")
+    except (OSError, Exception) as e:
+        _cnc_mark_disconnected(str(e))
+        return None
     import time
     deadline = time.time() + 1.0
     while time.time() < deadline:
-        resp = ser.readline().decode("ascii", errors="replace").strip()
+        try:
+            resp = ser.readline().decode("ascii", errors="replace").strip()
+        except (OSError, Exception) as e:
+            _cnc_mark_disconnected(str(e))
+            return None
         if resp.startswith("<") and resp.endswith(">"):
             inner = resp[1:-1]
             parts = inner.split("|")
@@ -605,6 +621,8 @@ def cnc_stream_gcode(gcode_str):
 
             with cnc_status_lock:
                 shared_cnc_status["progress"] = i + 1
+    except OSError as e:
+        _cnc_mark_disconnected(str(e))
     except Exception as e:
         with cnc_status_lock:
             shared_cnc_status["error"] = str(e)
@@ -728,6 +746,9 @@ if args.headless:
                     with cnc_status_lock:
                         shared_cnc_status["state"] = result["state"]
                         shared_cnc_status["mpos"] = result["mpos"]
+            except Exception:
+                _cnc_mark_disconnected("Status query failed")
+                status["connected"] = False
             finally:
                 cnc_lock.release()
         return jsonify(status)
@@ -740,7 +761,10 @@ if args.headless:
         if cnc_lock.acquire(timeout=0.5):
             try:
                 if cnc_serial:
-                    cnc_serial.write(b"!")
+                    try:
+                        cnc_serial.write(b"!")
+                    except (OSError, Exception):
+                        _cnc_mark_disconnected("Feed hold write failed")
             finally:
                 cnc_lock.release()
         return jsonify(ok=True)
@@ -752,10 +776,13 @@ if args.headless:
         if cnc_lock.acquire(timeout=1.0):
             try:
                 if cnc_serial:
-                    cnc_serial.write(b"\x18")
-                    import time
-                    time.sleep(0.5)
-                    cnc_serial.reset_input_buffer()
+                    try:
+                        cnc_serial.write(b"\x18")
+                        import time
+                        time.sleep(0.5)
+                        cnc_serial.reset_input_buffer()
+                    except (OSError, Exception):
+                        _cnc_mark_disconnected("Reset write failed")
                 with cnc_status_lock:
                     shared_cnc_status["error"] = None
                     shared_cnc_status["streaming"] = False
