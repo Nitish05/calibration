@@ -501,6 +501,7 @@ shared_cnc_status = {
     "error": None,
 }
 shared_cnc_stop = False
+shared_cnc_wco = {"x": 0.0, "y": 0.0, "z": 0.0}  # cached work coordinate offset
 
 # ---------------------------------------------------------------------------
 # CNC serial helpers
@@ -516,10 +517,7 @@ def cnc_connect(port, baud):
     try:
         ser = serial.Serial(port, baud, timeout=2)
         import time
-        time.sleep(2)  # wait for Grbl boot
-        ser.reset_input_buffer()
-        ser.write(b"\x18")  # soft reset
-        time.sleep(0.5)
+        time.sleep(1)  # wait for serial to stabilize
         ser.reset_input_buffer()
         with cnc_lock:
             cnc_serial = ser
@@ -579,6 +577,7 @@ def cnc_query_status(ser):
             inner = resp[1:-1]
             parts = inner.split("|")
             state = parts[0]
+            global shared_cnc_wco
             mpos = wpos = wco = None
             for p in parts[1:]:
                 if p.startswith("MPos:"):
@@ -593,13 +592,16 @@ def cnc_query_status(ser):
                     c = p[4:].split(",")
                     if len(c) >= 3:
                         wco = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
-            # Compute wpos from mpos - wco if not directly reported
-            if wpos is None and mpos is not None and wco is not None:
-                wpos = {"x": mpos["x"] - wco["x"],
-                        "y": mpos["y"] - wco["y"],
-                        "z": mpos["z"] - wco["z"]}
+            # Cache WCO whenever Grbl sends it (only sent every ~10-30 reports)
+            if wco is not None:
+                shared_cnc_wco = wco
+            # Compute wpos from mpos using cached wco
+            if wpos is None and mpos is not None:
+                wpos = {"x": mpos["x"] - shared_cnc_wco["x"],
+                        "y": mpos["y"] - shared_cnc_wco["y"],
+                        "z": mpos["z"] - shared_cnc_wco["z"]}
             if wpos is None:
-                wpos = mpos or {"x": 0.0, "y": 0.0, "z": 0.0}
+                wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
             return {"state": state, "wpos": wpos}
     return None
 
