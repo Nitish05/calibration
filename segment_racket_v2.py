@@ -463,6 +463,8 @@ parser.add_argument("--serial-port", type=str, default="/dev/ttyUSB0",
                     help="Serial port for CNC controller")
 parser.add_argument("--baud-rate", type=int, default=115200,
                     help="Serial baud rate for CNC controller")
+parser.add_argument("--camera-device", type=int, default=0,
+                    help="Video device index (e.g. 8 for /dev/video8)")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -630,7 +632,7 @@ detector = Detector(
 # ---------------------------------------------------------------------------
 # Camera + stream
 # ---------------------------------------------------------------------------
-cap = Camera()
+cap = Camera(device=args.camera_device)
 stream = None
 if args.headless:
     stream = StreamServer(port=args.port, title="Racket Segmentation v2", html=ROI_HTML)
