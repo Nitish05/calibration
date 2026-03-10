@@ -222,8 +222,11 @@ def index():
 @app.route("/stream")
 def stream_proxy():
     """Proxy the Pi MJPEG stream to avoid cross-origin issues."""
-    def generate():
+    try:
         resp = requests.get(f"{PI_URL}/stream", stream=True, timeout=10)
+    except requests.ConnectionError:
+        return Response("Pi camera not reachable", status=502)
+    def generate():
         for chunk in resp.iter_content(chunk_size=4096):
             yield chunk
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
