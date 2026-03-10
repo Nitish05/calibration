@@ -524,7 +524,9 @@ def cnc_connect(port, baud):
         with cnc_status_lock:
             shared_cnc_status["connected"] = True
             shared_cnc_status["error"] = None
-        print(f"[CNC] Connected to {port} @ {baud}")
+        # Fetch initial WCO by querying status until we get one with WCO
+        _cnc_fetch_initial_wco(ser)
+        print(f"[CNC] Connected to {port} @ {baud}  WCO: {shared_cnc_wco}")
     except Exception as e:
         print(f"[CNC] Failed to connect to {port}: {e}")
         with cnc_status_lock:
@@ -558,8 +560,35 @@ def cnc_send_line(ser, line):
     return True
 
 
+def _cnc_fetch_initial_wco(ser):
+    """Query status repeatedly until we get a WCO value to cache."""
+    global shared_cnc_wco
+    import time
+    for _ in range(50):  # Grbl sends WCO every ~10-30 reports
+        try:
+            ser.write(b"?")
+            deadline = time.time() + 0.2
+            while time.time() < deadline:
+                resp = ser.readline().decode("ascii", errors="replace").strip()
+                if resp.startswith("<") and resp.endswith(">"):
+                    for p in resp[1:-1].split("|"):
+                        if p.startswith("WCO:"):
+                            c = p[4:].split(",")
+                            if len(c) >= 3:
+                                shared_cnc_wco = {"x": float(c[0]),
+                                                  "y": float(c[1]),
+                                                  "z": float(c[2])}
+                                return
+        except Exception:
+            return
+        time.sleep(0.05)
+    print("[CNC] Warning: could not fetch initial WCO, using 0,0,0")
+
+
 def cnc_query_status(ser):
-    """Send ? real-time command and parse Grbl status response."""
+    """Send ? real-time command and parse Grbl status response.
+    Uses cached WCO for fast MPos→WPos conversion."""
+    global shared_cnc_wco
     try:
         ser.write(b"?")
     except (OSError, Exception) as e:
@@ -577,13 +606,14 @@ def cnc_query_status(ser):
             inner = resp[1:-1]
             parts = inner.split("|")
             state = parts[0]
-            global shared_cnc_wco
-            mpos = wpos = wco = None
+            wpos = None
             for p in parts[1:]:
                 if p.startswith("MPos:"):
                     c = p[5:].split(",")
                     if len(c) >= 3:
-                        mpos = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+                        wpos = {"x": float(c[0]) - shared_cnc_wco["x"],
+                                "y": float(c[1]) - shared_cnc_wco["y"],
+                                "z": float(c[2]) - shared_cnc_wco["z"]}
                 elif p.startswith("WPos:"):
                     c = p[5:].split(",")
                     if len(c) >= 3:
@@ -591,15 +621,9 @@ def cnc_query_status(ser):
                 elif p.startswith("WCO:"):
                     c = p[4:].split(",")
                     if len(c) >= 3:
-                        wco = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
-            # Cache WCO whenever Grbl sends it (only sent every ~10-30 reports)
-            if wco is not None:
-                shared_cnc_wco = wco
-            # Compute wpos from mpos using cached wco
-            if wpos is None and mpos is not None:
-                wpos = {"x": mpos["x"] - shared_cnc_wco["x"],
-                        "y": mpos["y"] - shared_cnc_wco["y"],
-                        "z": mpos["z"] - shared_cnc_wco["z"]}
+                        shared_cnc_wco = {"x": float(c[0]),
+                                          "y": float(c[1]),
+                                          "z": float(c[2])}
             if wpos is None:
                 wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
             return {"state": state, "wpos": wpos}
@@ -874,6 +898,7 @@ def compute_offset_path(world_pts, offset_mm):
         cam_dir = -normals  # toward center
 
     heading_rad = np.arctan2(cam_dir[:, 1], cam_dir[:, 0])
+    heading_rad += np.pi  # flip 180° — camera mounted facing backward
     heading_rad = np.unwrap(heading_rad)  # smooth out 360° jumps
     heading_deg = np.degrees(heading_rad)
 
