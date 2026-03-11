@@ -15,7 +15,7 @@ CX = 959.5
 CY = 539.5
 
 # AprilTag settings
-TAG_SIZE = 0.05684  # 56.84 mm in meters
+TAG_SIZE = 0.07769  # 77.69 mm in meters
 
 CAMERA_MATRIX = np.array([
     [FX, 0.0, CX],
