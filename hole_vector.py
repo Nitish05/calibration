@@ -6,9 +6,14 @@ detects the bright circle, records CNC XY positions, and computes
 """
 
 import argparse
+import atexit
 import io
 import json
 import math
+import os
+import signal
+import subprocess
+import sys
 import time
 from datetime import datetime
 
@@ -38,6 +43,37 @@ parser.add_argument("--cy-intrinsic", type=float, default=None)
 args = parser.parse_args()
 
 PI_URL = f"http://{args.pi_host}:{args.pi_port}"
+
+# ---------------------------------------------------------------------------
+# Launch pi_stream.py as a subprocess
+# ---------------------------------------------------------------------------
+_pi_stream_proc = None
+_pi_stream_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pi_stream.py")
+
+if os.path.exists(_pi_stream_script):
+    print(f"Launching pi_stream.py on port {args.pi_port}...")
+    _pi_stream_proc = subprocess.Popen(
+        [sys.executable, _pi_stream_script],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+
+    def _kill_pi_stream():
+        if _pi_stream_proc and _pi_stream_proc.poll() is None:
+            _pi_stream_proc.terminate()
+            try:
+                _pi_stream_proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                _pi_stream_proc.kill()
+            print("pi_stream.py stopped.")
+
+    atexit.register(_kill_pi_stream)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    # Wait briefly for the stream server to be ready
+    time.sleep(2)
+else:
+    print(f"Warning: {_pi_stream_script} not found, skipping auto-launch.")
 
 # ---------------------------------------------------------------------------
 # CNC setup
