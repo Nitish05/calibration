@@ -36,7 +36,10 @@ parser.add_argument("--baud", type=int, default=115200)
 parser.add_argument("--serial-port", default="auto")
 parser.add_argument("--threshold", type=int, default=128)
 parser.add_argument("--min-area", type=int, default=100)
-parser.add_argument("--z-working", type=float, default=50.0)
+parser.add_argument("--z-working", type=float, default=None,
+                    help="Fixed camera-to-frame distance (mm). Auto-calculated from hole size if omitted.")
+parser.add_argument("--hole-diameter", type=float, default=3.0,
+                    help="Known grommet hole diameter in mm (default 3.0). Used to estimate z_working per capture.")
 parser.add_argument("--fx", type=float, default=None)
 parser.add_argument("--fy", type=float, default=None)
 parser.add_argument("--cx-intrinsic", type=float, default=None)
@@ -138,6 +141,18 @@ def detect_circle(frame, threshold=128, min_area=100):
     return (float(cx), float(cy), float(radius), float(circularity))
 
 
+def estimate_z_working(radius_px, fx, hole_diameter_mm):
+    """Estimate camera-to-frame distance from detected circle size.
+
+    Pinhole model: real_size / distance = pixel_size / focal_length
+    => distance = real_diameter * fx / pixel_diameter
+    """
+    pixel_diameter = 2.0 * radius_px
+    if pixel_diameter < 1.0:
+        return None
+    return hole_diameter_mm * fx / pixel_diameter
+
+
 def capture_to_world_point(cap, z_working, fx, fy, cx_intr, cy_intr):
     """Project a capture into a 3D world point on the near frame surface.
 
@@ -173,15 +188,19 @@ def capture_to_world_point(cap, z_working, fx, fy, cx_intr, cy_intr):
     return (world_x, world_y, world_h)
 
 
-def compute_3d_vector(cap_a, cap_b, z_working, fx, fy, cx_intr, cy_intr):
+def compute_3d_vector(cap_a, cap_b, z_working_a, fx, fy, cx_intr, cy_intr, z_working_b=None):
     """Compute 3D vector through a hole from two captures.
 
     Each capture (from opposite sides of the frame) gives a point where the
     camera ray hits the near surface.  The vector from point_a to point_b is
     the direction the hole runs through the frame.
+
+    z_working can differ per side (estimated from circle radius).
     """
-    pt_a = capture_to_world_point(cap_a, z_working, fx, fy, cx_intr, cy_intr)
-    pt_b = capture_to_world_point(cap_b, z_working, fx, fy, cx_intr, cy_intr)
+    if z_working_b is None:
+        z_working_b = z_working_a
+    pt_a = capture_to_world_point(cap_a, z_working_a, fx, fy, cx_intr, cy_intr)
+    pt_b = capture_to_world_point(cap_b, z_working_b, fx, fy, cx_intr, cy_intr)
 
     vx = pt_b[0] - pt_a[0]
     vy = pt_b[1] - pt_a[1]
@@ -284,6 +303,12 @@ def _do_capture(side, threshold, min_area):
     _, jpeg = cv2.imencode(".jpg", frame)
     preview_b64 = base64.b64encode(jpeg.tobytes()).decode()
 
+    # Estimate camera-to-frame distance from circle size
+    fx_val = args.fx if args.fx else 1425.0
+    z_est = None
+    if result and result[2] > 0:
+        z_est = round(estimate_z_working(result[2], fx_val, args.hole_diameter), 2)
+
     measurement = {
         "side": side,
         "cx": result[0] if result else None,
@@ -293,6 +318,7 @@ def _do_capture(side, threshold, min_area):
         "cnc_x": cnc_pos["x"],
         "cnc_y": cnc_pos["y"],
         "cnc_z": cnc_pos["z"],
+        "z_est": z_est,
         "timestamp": datetime.now().isoformat(),
         "detected": result is not None,
     }
@@ -331,6 +357,15 @@ def clear_measurements():
     return jsonify({"status": "cleared"})
 
 
+def _resolve_z_working(cap, fx):
+    """Return z_working for a capture: fixed if --z-working set, else estimated from circle radius."""
+    if args.z_working is not None:
+        return args.z_working
+    if cap.get("radius") and cap["radius"] > 0:
+        return estimate_z_working(cap["radius"], fx, args.hole_diameter)
+    return None
+
+
 @app.route("/compute", methods=["POST"])
 def compute():
     # Find last A and last B
@@ -347,21 +382,25 @@ def compute():
     if not last_a or not last_b:
         return jsonify({"error": "Need both a Side A and Side B capture with detected circles"}), 400
 
-    # Pi Camera v2.1 (IMX219) at 1640x1232, close-focus estimate:
-    # Nominal f=3.04mm, pixel pitch=2.24um -> 1357px. ~5% increase for close focus -> 1425px.
     fx = args.fx if args.fx else 1425.0
     fy = args.fy if args.fy else 1425.0
-    cx_intr = args.cx_intrinsic if args.cx_intrinsic else 820.0  # 1640/2
-    cy_intr = args.cy_intrinsic if args.cy_intrinsic else 616.0  # 1232/2
+    cx_intr = args.cx_intrinsic if args.cx_intrinsic else 820.0
+    cy_intr = args.cy_intrinsic if args.cy_intrinsic else 616.0
+
+    z_a = _resolve_z_working(last_a, fx)
+    z_b = _resolve_z_working(last_b, fx)
+    if z_a is None or z_b is None:
+        return jsonify({"error": "Cannot estimate distance — circle radius too small"}), 400
 
     result = compute_3d_vector(
         last_a, last_b,
-        args.z_working,
-        fx, fy, cx_intr, cy_intr,
+        z_a, fx, fy, cx_intr, cy_intr, z_working_b=z_b,
     )
     if result is None:
         return jsonify({"error": "Degenerate vector (zero length)"}), 400
 
+    result["z_working_a"] = round(z_a, 2)
+    result["z_working_b"] = round(z_b, 2)
     result["capture_a"] = last_a
     result["capture_b"] = last_b
     vectors.append(result)
@@ -451,18 +490,21 @@ def auto_compute():
     if len(auto_caps) < 2:
         return jsonify({"error": "Need at least 2 auto captures with detected circles"}), 400
 
-    # Project each capture to world XY
+    # Project each capture to world XY (per-capture z_working)
     world_pts = []
     for idx, cap in auto_caps:
-        wp = capture_to_world_point(cap, args.z_working, fx, fy, cx_intr, cy_intr)
-        world_pts.append((idx, cap, wp[0], wp[1]))  # (meas_idx, cap, world_x, world_y)
+        z_w = _resolve_z_working(cap, fx)
+        if z_w is None:
+            continue
+        wp = capture_to_world_point(cap, z_w, fx, fy, cx_intr, cy_intr)
+        world_pts.append((idx, cap, wp[0], wp[1], z_w))  # (meas_idx, cap, world_x, world_y, z_w)
 
     # Build candidate pairs, filter by world XY distance and Z angular diff
     candidates = []
     for i in range(len(world_pts)):
         for j in range(i + 1, len(world_pts)):
-            _, cap_i, wx_i, wy_i = world_pts[i]
-            _, cap_j, wx_j, wy_j = world_pts[j]
+            _, cap_i, wx_i, wy_i, _ = world_pts[i]
+            _, cap_j, wx_j, wy_j, _ = world_pts[j]
             wdist = math.sqrt((wx_i - wx_j) ** 2 + (wy_i - wy_j) ** 2)
             dz = abs(cap_i["cnc_z"] - cap_j["cnc_z"])
             dz = min(dz, 360.0 - dz)
@@ -481,20 +523,24 @@ def auto_compute():
         matched.add(i)
         matched.add(j)
 
-        _, cap_i, _, _ = world_pts[i]
-        _, cap_j, _, _ = world_pts[j]
+        _, cap_i, _, _, zw_i = world_pts[i]
+        _, cap_j, _, _, zw_j = world_pts[j]
 
         # Assign sides: smaller cnc_z -> A, larger -> B
         if cap_i["cnc_z"] <= cap_j["cnc_z"]:
             cap_a, cap_b = cap_i, cap_j
+            z_a, z_b = zw_i, zw_j
         else:
             cap_a, cap_b = cap_j, cap_i
+            z_a, z_b = zw_j, zw_i
 
-        result = compute_3d_vector(cap_a, cap_b, args.z_working, fx, fy, cx_intr, cy_intr)
+        result = compute_3d_vector(cap_a, cap_b, z_a, fx, fy, cx_intr, cy_intr, z_working_b=z_b)
         if result is None:
             warnings.append(f"Degenerate vector for pair (world dist={wdist:.1f}mm)")
             continue
 
+        result["z_working_a"] = round(z_a, 2)
+        result["z_working_b"] = round(z_b, 2)
         result["capture_a"] = cap_a
         result["capture_b"] = cap_b
         vectors.append(result)
