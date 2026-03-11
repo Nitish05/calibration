@@ -30,7 +30,6 @@ parser.add_argument("--baud", type=int, default=115200)
 parser.add_argument("--serial-port", default="auto")
 parser.add_argument("--threshold", type=int, default=128)
 parser.add_argument("--min-area", type=int, default=100)
-parser.add_argument("--frame-thickness", type=float, default=12.0)
 parser.add_argument("--z-working", type=float, default=50.0)
 parser.add_argument("--fx", type=float, default=None)
 parser.add_argument("--fy", type=float, default=None)
@@ -129,15 +128,12 @@ def capture_to_world_point(cap, z_working, fx, fy, cx_intr, cy_intr):
     return (world_x, world_y, world_h)
 
 
-def compute_3d_vector(cap_a, cap_b, frame_thickness, z_working, fx, fy, cx_intr, cy_intr):
+def compute_3d_vector(cap_a, cap_b, z_working, fx, fy, cx_intr, cy_intr):
     """Compute 3D vector through a hole from two captures.
 
     Each capture (from opposite sides of the frame) gives a point where the
     camera ray hits the near surface.  The vector from point_a to point_b is
     the direction the hole runs through the frame.
-
-    frame_thickness is recorded for reference but not used in the projection
-    (the two camera positions + pixel offsets determine both endpoints).
     """
     pt_a = capture_to_world_point(cap_a, z_working, fx, fy, cx_intr, cy_intr)
     pt_b = capture_to_world_point(cap_b, z_working, fx, fy, cx_intr, cy_intr)
@@ -159,7 +155,6 @@ def compute_3d_vector(cap_a, cap_b, frame_thickness, z_working, fx, fy, cx_intr,
         "vector": list(norm),
         "angle_deg": round(angle_deg, 2),
         "magnitude_mm": round(mag, 3),
-        "frame_thickness_ref": frame_thickness,
     }
 
 
@@ -218,18 +213,6 @@ app = Flask(__name__)
 def index():
     return INDEX_HTML
 
-
-@app.route("/stream")
-def stream_proxy():
-    """Proxy the Pi MJPEG stream to avoid cross-origin issues."""
-    try:
-        resp = requests.get(f"{PI_URL}/stream", stream=True, timeout=10)
-    except requests.ConnectionError:
-        return Response("Pi camera not reachable", status=502)
-    def generate():
-        for chunk in resp.iter_content(chunk_size=4096):
-            yield chunk
-    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
 
 @app.route("/capture", methods=["POST"])
@@ -311,16 +294,16 @@ def compute():
     if not last_a or not last_b:
         return jsonify({"error": "Need both a Side A and Side B capture with detected circles"}), 400
 
-    # Camera intrinsics (defaults: image center, reasonable focal length)
-    # Pi camera v1 at 1640x1232: ~1500px focal length is a rough estimate
-    fx = args.fx if args.fx else 1500.0
-    fy = args.fy if args.fy else 1500.0
+    # Pi Camera v2.1 (IMX219) at 1640x1232, close-focus estimate:
+    # Nominal f=3.04mm, pixel pitch=2.24um -> 1357px. ~5% increase for close focus -> 1425px.
+    fx = args.fx if args.fx else 1425.0
+    fy = args.fy if args.fy else 1425.0
     cx_intr = args.cx_intrinsic if args.cx_intrinsic else 820.0  # 1640/2
     cy_intr = args.cy_intrinsic if args.cy_intrinsic else 616.0  # 1232/2
 
     result = compute_3d_vector(
         last_a, last_b,
-        args.frame_thickness, args.z_working,
+        args.z_working,
         fx, fy, cx_intr, cy_intr,
     )
     if result is None:
@@ -436,8 +419,6 @@ INDEX_HTML = """<!DOCTYPE html>
   <input type="range" id="threshold" min="0" max="255" value=\"""" + str(args.threshold) + """">
   <label>Min area:</label>
   <input type="number" id="min-area" value=\"""" + str(args.min_area) + """" min="1">
-  <label>Frame thickness (mm):</label>
-  <input type="number" id="frame-thickness" value=\"""" + str(args.frame_thickness) + """" step="0.1">
 
   <button class="btn-a" onclick="doCapture('A')">Capture Side A</button>
   <button class="btn-b" onclick="doCapture('B')">Capture Side B</button>
@@ -465,7 +446,7 @@ INDEX_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-document.getElementById('live-feed').src = '/stream';
+document.getElementById('live-feed').src = '""" + PI_URL + """/stream';
 
 const threshSlider = document.getElementById('threshold');
 const threshVal = document.getElementById('thresh-val');
