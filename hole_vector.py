@@ -388,6 +388,14 @@ def auto_poll():
     threshold = body.get("threshold", args.threshold)
     min_area = body.get("min_area", args.min_area)
 
+    # Get a reliable CNC position first — skip if unavailable
+    if not cnc.connected:
+        return jsonify({"captured": False})
+    cnc_status_resp = cnc.query_status()
+    if cnc_status_resp is None:
+        return jsonify({"captured": False})
+    cnc_pos = cnc_status_resp["wpos"]
+
     try:
         measurement, preview_b64 = _do_capture("auto", threshold, min_area)
     except Exception:
@@ -395,6 +403,11 @@ def auto_poll():
 
     if not measurement["detected"]:
         return jsonify({"captured": False})
+
+    # Override with the pre-fetched position to avoid serial contention
+    measurement["cnc_x"] = cnc_pos["x"]
+    measurement["cnc_y"] = cnc_pos["y"]
+    measurement["cnc_z"] = cnc_pos["z"]
 
     # Debounce: must have moved enough from last capture position
     now = time.time()
