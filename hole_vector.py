@@ -7,6 +7,7 @@ detects the bright circle, records CNC XY positions, and computes
 
 import argparse
 import atexit
+import base64
 import io
 import json
 import math
@@ -93,6 +94,14 @@ if _port:
 # ---------------------------------------------------------------------------
 measurements = []  # list of {side, cx, cy, radius, circularity, cnc_x, cnc_y, timestamp}
 vectors = []       # list of computed vector results
+
+# Auto-capture state
+auto_mode = False
+auto_last_pos = None      # last auto-capture CNC position (x, y, z)
+auto_last_time = 0.0      # last auto-capture timestamp
+AUTO_XY_MIN = 5.0         # mm — min XY move to trigger new capture
+AUTO_Z_MIN = 10.0         # deg — min Z change to trigger at same XY
+AUTO_COOLDOWN = 1.0       # seconds between auto-captures
 
 # ---------------------------------------------------------------------------
 # Core functions
@@ -251,18 +260,12 @@ def index():
 
 
 
-@app.route("/capture", methods=["POST"])
-def do_capture():
-    body = request.get_json(force=True)
-    side = body.get("side", "A").upper()
-    threshold = body.get("threshold", args.threshold)
-    min_area = body.get("min_area", args.min_area)
+def _do_capture(side, threshold, min_area):
+    """Capture a frame, detect circle, return (measurement, preview_b64).
 
-    try:
-        frame = capture_frame()
-    except Exception as e:
-        return jsonify({"error": f"Camera capture failed: {e}"}), 500
-
+    Raises on camera failure.
+    """
+    frame = capture_frame()
     result = detect_circle(frame, threshold=threshold, min_area=min_area)
 
     # Get CNC position
@@ -279,7 +282,6 @@ def do_capture():
         cv2.circle(frame, (int(cx), int(cy)), 3, (0, 255, 0), -1)
 
     _, jpeg = cv2.imencode(".jpg", frame)
-    import base64
     preview_b64 = base64.b64encode(jpeg.tobytes()).decode()
 
     measurement = {
@@ -294,6 +296,21 @@ def do_capture():
         "timestamp": datetime.now().isoformat(),
         "detected": result is not None,
     }
+    return measurement, preview_b64
+
+
+@app.route("/capture", methods=["POST"])
+def do_capture():
+    body = request.get_json(force=True)
+    side = body.get("side", "A").upper()
+    threshold = body.get("threshold", args.threshold)
+    min_area = body.get("min_area", args.min_area)
+
+    try:
+        measurement, preview_b64 = _do_capture(side, threshold, min_area)
+    except Exception as e:
+        return jsonify({"error": f"Camera capture failed: {e}"}), 500
+
     measurements.append(measurement)
 
     return jsonify({
@@ -349,6 +366,137 @@ def compute():
     result["capture_b"] = last_b
     vectors.append(result)
     return jsonify({"vector": result, "index": len(vectors) - 1})
+
+
+@app.route("/auto/toggle", methods=["POST"])
+def auto_toggle():
+    global auto_mode, auto_last_pos, auto_last_time
+    auto_mode = not auto_mode
+    if auto_mode:
+        auto_last_pos = None
+        auto_last_time = 0.0
+    return jsonify({"auto_mode": auto_mode})
+
+
+@app.route("/auto/poll", methods=["POST"])
+def auto_poll():
+    global auto_last_pos, auto_last_time
+    if not auto_mode:
+        return jsonify({"captured": False})
+
+    body = request.get_json(force=True) if request.data else {}
+    threshold = body.get("threshold", args.threshold)
+    min_area = body.get("min_area", args.min_area)
+
+    try:
+        measurement, preview_b64 = _do_capture("auto", threshold, min_area)
+    except Exception:
+        return jsonify({"captured": False})
+
+    if not measurement["detected"]:
+        return jsonify({"captured": False})
+
+    # Debounce: must have moved enough from last capture position
+    now = time.time()
+    if now - auto_last_time < AUTO_COOLDOWN:
+        return jsonify({"captured": False})
+
+    cur_pos = (measurement["cnc_x"], measurement["cnc_y"], measurement["cnc_z"])
+    if auto_last_pos is not None:
+        dx = cur_pos[0] - auto_last_pos[0]
+        dy = cur_pos[1] - auto_last_pos[1]
+        xy_dist = math.sqrt(dx * dx + dy * dy)
+        dz = abs(cur_pos[2] - auto_last_pos[2])
+        dz = min(dz, 360.0 - dz)  # wrapped angular difference
+        if xy_dist < AUTO_XY_MIN and dz < AUTO_Z_MIN:
+            return jsonify({"captured": False})
+
+    # Passed debounce — record this capture
+    auto_last_pos = cur_pos
+    auto_last_time = now
+    measurements.append(measurement)
+
+    return jsonify({
+        "captured": True,
+        "measurement": measurement,
+        "preview": preview_b64,
+        "index": len(measurements) - 1,
+    })
+
+
+@app.route("/auto_compute", methods=["POST"])
+def auto_compute():
+    fx = args.fx if args.fx else 1425.0
+    fy = args.fy if args.fy else 1425.0
+    cx_intr = args.cx_intrinsic if args.cx_intrinsic else 820.0
+    cy_intr = args.cy_intrinsic if args.cy_intrinsic else 616.0
+
+    # Collect auto captures with detected circles
+    auto_caps = [(i, m) for i, m in enumerate(measurements)
+                 if m["side"] == "auto" and m["detected"]]
+
+    if len(auto_caps) < 2:
+        return jsonify({"error": "Need at least 2 auto captures with detected circles"}), 400
+
+    # Project each capture to world XY
+    world_pts = []
+    for idx, cap in auto_caps:
+        wp = capture_to_world_point(cap, args.z_working, fx, fy, cx_intr, cy_intr)
+        world_pts.append((idx, cap, wp[0], wp[1]))  # (meas_idx, cap, world_x, world_y)
+
+    # Build candidate pairs, filter by world XY distance and Z angular diff
+    candidates = []
+    for i in range(len(world_pts)):
+        for j in range(i + 1, len(world_pts)):
+            _, cap_i, wx_i, wy_i = world_pts[i]
+            _, cap_j, wx_j, wy_j = world_pts[j]
+            wdist = math.sqrt((wx_i - wx_j) ** 2 + (wy_i - wy_j) ** 2)
+            dz = abs(cap_i["cnc_z"] - cap_j["cnc_z"])
+            dz = min(dz, 360.0 - dz)
+            if wdist < 10.0 and dz > 90.0:
+                candidates.append((wdist, i, j))
+
+    # Sort by world XY distance ascending, greedy match
+    candidates.sort()
+    matched = set()
+    new_vectors = []
+    warnings = []
+
+    for wdist, i, j in candidates:
+        if i in matched or j in matched:
+            continue
+        matched.add(i)
+        matched.add(j)
+
+        _, cap_i, _, _ = world_pts[i]
+        _, cap_j, _, _ = world_pts[j]
+
+        # Assign sides: smaller cnc_z -> A, larger -> B
+        if cap_i["cnc_z"] <= cap_j["cnc_z"]:
+            cap_a, cap_b = cap_i, cap_j
+        else:
+            cap_a, cap_b = cap_j, cap_i
+
+        result = compute_3d_vector(cap_a, cap_b, args.z_working, fx, fy, cx_intr, cy_intr)
+        if result is None:
+            warnings.append(f"Degenerate vector for pair (world dist={wdist:.1f}mm)")
+            continue
+
+        result["capture_a"] = cap_a
+        result["capture_b"] = cap_b
+        vectors.append(result)
+        new_vectors.append(result)
+
+    unmatched_count = len(auto_caps) - len(matched)
+    if unmatched_count > 0:
+        warnings.append(f"{unmatched_count} capture(s) could not be paired")
+
+    return jsonify({
+        "vectors": new_vectors,
+        "count": len(new_vectors),
+        "unmatched_count": unmatched_count,
+        "warnings": warnings,
+    })
 
 
 @app.route("/vectors", methods=["GET"])
@@ -423,6 +571,11 @@ INDEX_HTML = """<!DOCTYPE html>
   #log div { padding: 1px 0; }
   .log-ok { color: #4caf50; }
   .log-err { color: #f44336; }
+  .btn-auto { background: #555; color: #fff; }
+  .btn-auto.active { background: #00bcd4; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.7 } }
+  .btn-autocompute { background: #009688; color: #fff; }
+  .flash { box-shadow: 0 0 12px 4px #00bcd4; transition: box-shadow 0.2s; }
 </style>
 </head><body>
 
@@ -459,6 +612,8 @@ INDEX_HTML = """<!DOCTYPE html>
   <button class="btn-a" onclick="doCapture('A')">Capture Side A</button>
   <button class="btn-b" onclick="doCapture('B')">Capture Side B</button>
   <button class="btn-compute" onclick="doCompute()">Compute Vector</button>
+  <button class="btn-auto" id="btn-auto" onclick="toggleAuto()">Auto: OFF</button>
+  <button class="btn-autocompute" onclick="doAutoCompute()">Auto Compute</button>
   <button class="btn-clear" onclick="doClear()">Clear All</button>
   <button class="btn-plot" onclick="window.open('/plot','_blank')">View 3D Plot</button>
 </div>
@@ -594,6 +749,66 @@ function refreshVectors() {
       tb.appendChild(tr);
     });
   });
+}
+
+// --- Auto-capture ---
+let autoInterval = null;
+
+function toggleAuto() {
+  fetch('/auto/toggle', {method: 'POST'}).then(r => r.json()).then(data => {
+    const btn = document.getElementById('btn-auto');
+    if (data.auto_mode) {
+      btn.textContent = 'Auto: ON';
+      btn.classList.add('active');
+      autoInterval = setInterval(autoPoll, 500);
+      log('Auto-capture enabled', 'log-ok');
+    } else {
+      btn.textContent = 'Auto: OFF';
+      btn.classList.remove('active');
+      if (autoInterval) { clearInterval(autoInterval); autoInterval = null; }
+      log('Auto-capture disabled');
+    }
+  });
+}
+
+function autoPoll() {
+  const thresh = parseInt(threshSlider.value);
+  const minArea = parseInt(document.getElementById('min-area').value);
+  fetch('/auto/poll', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({threshold: thresh, min_area: minArea}),
+  }).then(r => r.json()).then(data => {
+    if (!data.captured) return;
+    const m = data.measurement;
+    // Flash canvas border
+    const canvas = document.getElementById('capture-canvas');
+    canvas.classList.add('flash');
+    setTimeout(() => canvas.classList.remove('flash'), 600);
+    // Draw preview
+    const img = new Image();
+    img.onload = () => {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+    };
+    img.src = 'data:image/jpeg;base64,' + data.preview;
+    // Update circle info
+    const info = document.getElementById('circle-info');
+    info.textContent = `Auto: circle at (${m.cx.toFixed(1)}, ${m.cy.toFixed(1)}) r=${m.radius.toFixed(1)} circ=${m.circularity}`;
+    log(`Auto #${data.index + 1}: r=${m.radius.toFixed(1)} circ=${m.circularity} Z=${m.cnc_z.toFixed(1)}`, 'log-ok');
+    refreshMeasurements();
+  }).catch(() => {});
+}
+
+function doAutoCompute() {
+  log('Auto computing vectors...');
+  fetch('/auto_compute', {method: 'POST'}).then(r => r.json()).then(data => {
+    if (data.error) { log(data.error, 'log-err'); return; }
+    log(`Auto compute: ${data.count} vector(s) paired, ${data.unmatched_count} unmatched`, 'log-ok');
+    if (data.warnings) data.warnings.forEach(w => log('Warning: ' + w, 'log-err'));
+    refreshVectors();
+  }).catch(e => log('Auto compute failed: ' + e, 'log-err'));
 }
 </script>
 </body></html>"""
