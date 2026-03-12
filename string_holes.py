@@ -94,7 +94,7 @@ if HAS_CAMERA and not args.no_camera:
 
 
 def camera_thread():
-    global shared_frame, shared_pose, tag_detected
+    global shared_frame, shared_jpeg, shared_pose, tag_detected
     while True:
         ret, frame = cap.read()
         if not ret:
