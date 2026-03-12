@@ -187,11 +187,12 @@ def video_feed():
     def generate():
         while True:
             with frame_lock:
-                if shared_frame is None:
-                    time.sleep(0.03)
-                    continue
-                _, jpeg = cv2.imencode(".jpg", shared_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-                data = jpeg.tobytes()
+                frame = shared_frame
+            if frame is None:
+                time.sleep(0.03)
+                continue
+            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            data = jpeg.tobytes()
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
             time.sleep(0.033)
 
@@ -327,8 +328,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
                     display: flex; flex-direction: column; gap: 10px; min-width: 180px; }
   .controls-panel h3 { margin-bottom: 4px; font-size: 0.95rem; color: #8ab4f8; }
 
-  .wrap { position: relative; display: inline-block; line-height: 0; width: 100%; }
-  .wrap img { display: block; width: 100%; height: auto; border-radius: 4px; }
+  .wrap { position: relative; line-height: 0; width: 100%; aspect-ratio: 1920/1080;
+          background: #111; border-radius: 4px; overflow: hidden; }
+  .wrap img { display: block; width: 100%; height: 100%; object-fit: contain; }
   .wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
   .no-camera-placeholder { display: flex; align-items: center; justify-content: center;
                            background: #111; border-radius: 4px; height: 300px;
