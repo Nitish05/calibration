@@ -4,16 +4,34 @@ Manually jog the CNC to string holes on a tennis racket and record
 XYZ positions (Z = rotational axis in degrees).  Points are tagged
 as 'inside' or 'outside' edge and visualised on an interactive 2D
 Plotly scatter plot.
+
+Optionally shows a live top-down USB camera feed with AprilTag
+detection overlay and hover-to-show world XY tooltip.
 """
 
 import argparse
 import atexit
 import json
+import threading
+import time
 from datetime import datetime
 
 from flask import Flask, Response, jsonify, request
 
 from cnc import CNCController
+
+# ---------------------------------------------------------------------------
+# Optional camera / vision imports
+# ---------------------------------------------------------------------------
+try:
+    import cv2
+    import numpy as np
+    from pupil_apriltags import Detector
+    from camera import Camera
+    from transforms import FX, FY, CX, CY, TAG_SIZE, CAMERA_MATRIX, pixels_to_world
+    HAS_CAMERA = True
+except ImportError:
+    HAS_CAMERA = False
 
 # ---------------------------------------------------------------------------
 # CLI arguments
@@ -22,6 +40,7 @@ parser = argparse.ArgumentParser(description="String hole position capture tool"
 parser.add_argument("--port", type=int, default=5001)
 parser.add_argument("--baud", type=int, default=115200)
 parser.add_argument("--serial-port", default="auto")
+parser.add_argument("--no-camera", action="store_true", help="Disable camera feed")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
@@ -44,6 +63,94 @@ atexit.register(cnc.disconnect)
 # ---------------------------------------------------------------------------
 points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "z": float, "timestamp": str}]
 
+# Camera shared state
+camera_available = False
+frame_lock = threading.Lock()
+shared_frame = None
+pose_lock = threading.Lock()
+shared_pose = (None, None)
+tag_detected = False
+
+# ---------------------------------------------------------------------------
+# Camera + AprilTag background thread
+# ---------------------------------------------------------------------------
+if HAS_CAMERA and not args.no_camera:
+    try:
+        cap = Camera()
+        detector = Detector(
+            families="tag36h11",
+            nthreads=4,
+            quad_decimate=2.0,
+            quad_sigma=0.0,
+            decode_sharpening=0.25,
+            refine_edges=True,
+        )
+        camera_available = True
+        print("[Camera] Initialized")
+    except Exception as e:
+        print(f"[Camera] Init failed: {e}")
+
+
+def camera_thread():
+    global shared_frame, shared_pose, tag_detected
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.03)
+            continue
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        detections = detector.detect(
+            gray,
+            estimate_tag_pose=True,
+            camera_params=[FX, FY, CX, CY],
+            tag_size=TAG_SIZE,
+        )
+
+        R, t = None, None
+        if detections:
+            det = detections[0]
+            R, t = det.pose_R, det.pose_t
+
+            # Draw tag outline
+            corners = det.corners.astype(int)
+            for i in range(4):
+                cv2.line(frame, tuple(corners[i]), tuple(corners[(i + 1) % 4]), (0, 255, 0), 2)
+
+            # Draw center
+            cx_tag, cy_tag = int(det.center[0]), int(det.center[1])
+            cv2.circle(frame, (cx_tag, cy_tag), 5, (0, 0, 255), -1)
+
+            # Draw 3D axes
+            axis_len = TAG_SIZE * 0.5
+            axis_pts = np.float32([[0, 0, 0], [axis_len, 0, 0], [0, axis_len, 0], [0, 0, -axis_len]])
+            rvec, _ = cv2.Rodrigues(R)
+            tvec = t.reshape(3, 1)
+            img_pts, _ = cv2.projectPoints(axis_pts, rvec, tvec, CAMERA_MATRIX, None)
+            img_pts = img_pts.astype(int).reshape(-1, 2)
+            origin = tuple(img_pts[0])
+            cv2.line(frame, origin, tuple(img_pts[1]), (0, 0, 255), 2)   # X red
+            cv2.line(frame, origin, tuple(img_pts[2]), (0, 255, 0), 2)   # Y green
+            cv2.line(frame, origin, tuple(img_pts[3]), (255, 0, 0), 2)   # Z blue
+
+            # ID text
+            cv2.putText(frame, f"ID:{det.tag_id}", (corners[0][0], corners[0][1] - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, "NO TAG", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
+
+        with frame_lock:
+            shared_frame = frame
+        with pose_lock:
+            shared_pose = (R, t)
+            tag_detected = R is not None
+
+
+if camera_available:
+    t_cam = threading.Thread(target=camera_thread, daemon=True)
+    t_cam.start()
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -52,18 +159,58 @@ app = Flask(__name__)
 
 @app.route("/")
 def index():
-    return INDEX_HTML
+    html = INDEX_HTML.replace("__CAMERA_AVAILABLE__", "true" if camera_available else "false")
+    return html
 
 
 @app.route("/cnc/status")
 def cnc_status():
     if not cnc.connected:
-        return jsonify({"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}})
-    status = cnc.query_status()
-    if status is None:
-        return jsonify({"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}})
-    status["connected"] = True
-    return jsonify(status)
+        resp = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
+    else:
+        status = cnc.query_status()
+        if status is None:
+            resp = {"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}}
+        else:
+            resp = status
+            resp["connected"] = True
+    resp["camera_available"] = camera_available
+    resp["tag_detected"] = tag_detected
+    return jsonify(resp)
+
+
+@app.route("/feed")
+def video_feed():
+    if not camera_available:
+        return Response("Camera not available", status=503)
+
+    def generate():
+        while True:
+            with frame_lock:
+                if shared_frame is None:
+                    time.sleep(0.03)
+                    continue
+                _, jpeg = cv2.imencode(".jpg", shared_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                data = jpeg.tobytes()
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
+            time.sleep(0.033)
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+
+@app.route("/world_coord", methods=["POST"])
+def world_coord():
+    if not camera_available:
+        return jsonify({"error": "Camera not available"}), 503
+    data = request.get_json(force=True)
+    u, v = float(data["u"]), float(data["v"])
+    with pose_lock:
+        R, t = shared_pose
+    if R is None:
+        return jsonify({"error": "NO TAG"})
+    pt = pixels_to_world(np.array([[u, v]]), R, t)
+    return jsonify(x_mm=round(float(pt[0, 0]), 1),
+                   y_mm=round(float(pt[0, 1]), 1))
 
 
 @app.route("/capture", methods=["POST"])
@@ -169,41 +316,67 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .state-idle { color: #4caf50; }
   .state-run { color: #ff9800; }
   .state-alarm { color: #f44336; }
+  .tag-ok { color: #4caf50; }
+  .tag-none { color: #f44336; }
 
-  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 20px; }
+  .main-row { display: flex; gap: 12px; padding: 12px 20px; }
+  .camera-panel { flex: 3; background: #16213e; border-radius: 8px; padding: 12px;
+                  min-width: 0; position: relative; }
+  .camera-panel h3 { margin-bottom: 8px; font-size: 0.95rem; color: #8ab4f8; }
+  .controls-panel { flex: 1; background: #16213e; border-radius: 8px; padding: 12px;
+                    display: flex; flex-direction: column; gap: 10px; min-width: 180px; }
+  .controls-panel h3 { margin-bottom: 4px; font-size: 0.95rem; color: #8ab4f8; }
+
+  .wrap { position: relative; display: inline-block; line-height: 0; width: 100%; }
+  .wrap img { display: block; width: 100%; height: auto; border-radius: 4px; }
+  .wrap canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  .no-camera-placeholder { display: flex; align-items: center; justify-content: center;
+                           background: #111; border-radius: 4px; height: 300px;
+                           color: #666; font-size: 1.1rem; font-family: monospace; }
+
+  #coord-tooltip {
+    position: fixed; pointer-events: none; z-index: 9999;
+    font-family: monospace; font-size: 13px; padding: 4px 8px;
+    background: rgba(0,0,0,0.85); border-radius: 4px;
+    white-space: nowrap; display: none; color: #0f0;
+  }
+
   button { padding: 8px 18px; border: none; border-radius: 6px; font-weight: 600;
-           cursor: pointer; font-size: 0.9rem; transition: opacity 0.15s; }
+           cursor: pointer; font-size: 0.9rem; transition: opacity 0.15s; width: 100%; }
   button:hover { opacity: 0.85; }
 
   .type-toggle { display: flex; border-radius: 6px; overflow: hidden; }
-  .type-toggle button { border-radius: 0; padding: 8px 22px; }
+  .type-toggle button { border-radius: 0; padding: 8px 0; width: 50%; }
   .btn-inside  { background: #333; color: #aaa; }
   .btn-outside { background: #333; color: #aaa; }
   .btn-inside.active  { background: #00bcd4; color: #fff; }
   .btn-outside.active { background: #ff9800; color: #fff; }
 
-  .btn-capture { background: #4caf50; color: #fff; font-size: 1rem; padding: 8px 28px; }
+  .btn-capture { background: #4caf50; color: #fff; font-size: 1rem; padding: 10px 18px; }
   .btn-undo    { background: #607d8b; color: #fff; }
   .btn-clear   { background: #f44336; color: #fff; }
   .btn-export  { background: #9c27b0; color: #fff; }
   .btn-import  { background: #3f51b5; color: #fff; }
 
-  .row { display: flex; gap: 12px; padding: 12px 20px; flex-wrap: wrap; }
-  .panel { background: #16213e; border-radius: 8px; padding: 12px; flex: 1; min-width: 300px; }
-  .panel h3 { margin-bottom: 8px; font-size: 0.95rem; color: #8ab4f8; }
+  .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
+         padding: 1px 7px; font-family: monospace; font-size: 0.75rem; color: #aaa; }
 
-  #plot { width: 100%; height: 500px; }
+  .bottom-row { display: flex; gap: 12px; padding: 0 20px 12px 20px; flex-wrap: wrap; }
+  .panel { background: #16213e; border-radius: 8px; padding: 12px; min-width: 300px; }
+  .panel h3 { margin-bottom: 8px; font-size: 0.95rem; color: #8ab4f8; }
+  .panel-plot { flex: 2; }
+  .panel-table { flex: 1; }
+
+  #plot { width: 100%; height: 400px; }
 
   table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
   th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #333; }
   th { color: #8ab4f8; }
   .del-btn { background: #c62828; color: #fff; border: none; border-radius: 4px;
-             padding: 2px 8px; cursor: pointer; font-size: 0.75rem; }
+             padding: 2px 8px; cursor: pointer; font-size: 0.75rem; width: auto; }
   .del-btn:hover { opacity: 0.8; }
   .badge-inside  { color: #00bcd4; }
   .badge-outside { color: #ff9800; }
-  .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
-         padding: 1px 7px; font-family: monospace; font-size: 0.8rem; color: #aaa; margin-left: 6px; }
 
   input[type=file] { display: none; }
 </style>
@@ -215,31 +388,39 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? Z(angle)=?.??&deg;</span></span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
+  <span id="tag-status" style="margin-left:auto"></span>
 </div>
 
-<div class="controls">
-  <div class="type-toggle">
-    <button class="btn-inside active" id="btn-inside" onclick="setType('inside')">Inside</button>
-    <button class="btn-outside" id="btn-outside" onclick="setType('outside')">Outside</button>
+<div class="main-row">
+  <div class="camera-panel" id="camera-panel">
+    <h3>Camera Feed</h3>
+    <div class="wrap" id="camera-wrap" style="display:none">
+      <img id="stream" src="/feed">
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="no-camera-placeholder" id="no-camera-msg">No Camera</div>
   </div>
-  <button class="btn-capture" onclick="capturePoint()">Capture</button>
-  <span class="kbd">Space</span>
-  <button class="btn-undo" onclick="undoLast()">Undo</button>
-  <button class="btn-clear" onclick="clearAll()">Clear All</button>
-  <button class="btn-export" onclick="exportJSON()">Export</button>
-  <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
-  <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+  <div class="controls-panel">
+    <h3>Controls</h3>
+    <div class="type-toggle">
+      <button class="btn-inside active" id="btn-inside" onclick="setType('inside')">Inside</button>
+      <button class="btn-outside" id="btn-outside" onclick="setType('outside')">Outside</button>
+    </div>
+    <button class="btn-capture" onclick="capturePoint()">Capture <span class="kbd">Space</span></button>
+    <button class="btn-undo" onclick="undoLast()">Undo</button>
+    <button class="btn-clear" onclick="clearAll()">Clear All</button>
+    <button class="btn-export" onclick="exportJSON()">Export</button>
+    <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
+    <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+  </div>
 </div>
 
-<div class="row">
-  <div class="panel" style="flex:2">
+<div class="bottom-row">
+  <div class="panel panel-plot">
     <h3>Scatter Plot (X vs Y)</h3>
     <div id="plot"></div>
   </div>
-</div>
-
-<div class="row">
-  <div class="panel">
+  <div class="panel panel-table">
     <h3>Captured Points</h3>
     <table>
       <thead><tr><th>#</th><th>Type</th><th>X</th><th>Y</th><th>Z&deg;</th><th>Time</th><th></th></tr></thead>
@@ -248,9 +429,79 @@ INDEX_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
+<div id="coord-tooltip"></div>
+
 <script>
+const CAMERA_AVAILABLE = __CAMERA_AVAILABLE__;
+const CAM_W = 1920, CAM_H = 1080;
 let currentType = 'inside';
 let plotInitialized = false;
+
+// --- Camera setup ---
+if (CAMERA_AVAILABLE) {
+  document.getElementById('camera-wrap').style.display = '';
+  document.getElementById('no-camera-msg').style.display = 'none';
+} else {
+  document.getElementById('camera-wrap').style.display = 'none';
+  document.getElementById('no-camera-msg').style.display = 'flex';
+}
+
+// --- Hover tooltip ---
+const tooltip = document.getElementById('coord-tooltip');
+const overlay = document.getElementById('overlay');
+const streamImg = document.getElementById('stream');
+let wcAborter = null;
+let wcLastTime = 0;
+const WC_INTERVAL = 100;
+
+function scaleF() { return streamImg.clientWidth / CAM_W; }
+
+function fetchWorldCoord(camU, camV, clientX, clientY) {
+  const now = Date.now();
+  if (now - wcLastTime < WC_INTERVAL) return;
+  wcLastTime = now;
+  if (wcAborter) wcAborter.abort();
+  wcAborter = new AbortController();
+  fetch('/world_coord', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({u: Math.round(camU), v: Math.round(camV)}),
+    signal: wcAborter.signal
+  })
+  .then(r => r.json())
+  .then(d => {
+    tooltip.style.display = 'block';
+    tooltip.style.left = (clientX + 14) + 'px';
+    tooltip.style.top  = (clientY + 14) + 'px';
+    if (d.error) {
+      tooltip.style.color = '#f44';
+      tooltip.textContent = d.error;
+    } else {
+      tooltip.style.color = '#0f0';
+      tooltip.textContent = 'X: ' + d.x_mm.toFixed(1) + ' mm  Y: ' + d.y_mm.toFixed(1) + ' mm';
+    }
+  })
+  .catch(() => {});
+}
+
+if (CAMERA_AVAILABLE) {
+  overlay.addEventListener('mousemove', e => {
+    const rect = overlay.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const sc = scaleF();
+    const camU = mx / sc, camV = my / sc;
+    fetchWorldCoord(camU, camV, e.clientX, e.clientY);
+  });
+  overlay.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+  // Resize canvas to match img
+  function resizeOverlay() {
+    overlay.width = streamImg.clientWidth;
+    overlay.height = streamImg.clientHeight;
+  }
+  streamImg.addEventListener('load', resizeOverlay);
+  window.addEventListener('resize', resizeOverlay);
+}
 
 // --- CNC polling ---
 function pollCNC() {
@@ -262,6 +513,18 @@ function pollCNC() {
     st.textContent = s.state;
     st.className = 'state state-' + s.state.toLowerCase();
     document.getElementById('cnc-conn').textContent = s.connected ? 'connected' : 'disconnected';
+
+    // Tag status
+    const tagEl = document.getElementById('tag-status');
+    if (s.camera_available) {
+      if (s.tag_detected) {
+        tagEl.innerHTML = '<span class="tag-ok">Tag: detected</span>';
+      } else {
+        tagEl.innerHTML = '<span class="tag-none">Tag: none</span>';
+      }
+    } else {
+      tagEl.textContent = '';
+    }
   }).catch(() => {});
 }
 setInterval(pollCNC, 500);
