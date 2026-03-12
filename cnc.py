@@ -104,6 +104,16 @@ class CNCController:
         return None
 
     # ------------------------------------------------------------------
+    # Jog cancel
+    # ------------------------------------------------------------------
+    def jog_cancel(self):
+        """Send realtime jog cancel (0x85) to immediately stop a jog."""
+        with self._lock:
+            ser = self._serial
+        if ser:
+            ser.write(b"\x85")
+
+    # ------------------------------------------------------------------
     # Send G-code
     # ------------------------------------------------------------------
     def send_line(self, line):

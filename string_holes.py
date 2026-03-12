@@ -1,7 +1,8 @@
 """String hole position capture tool.
 
 Manually jog the CNC to string holes on a tennis racket and record
-XYZ positions (Z = rotational axis in degrees).  Points are tagged
+positions.  The main CNC controls X, Y, A (rotational axis in degrees).
+A second CNC controls linear Z (up/down in mm).  Points are tagged
 as 'inside' or 'outside' edge and visualised on an interactive 2D
 Plotly scatter plot.
 
@@ -41,11 +42,13 @@ parser = argparse.ArgumentParser(description="String hole position capture tool"
 parser.add_argument("--port", type=int, default=5001)
 parser.add_argument("--baud", type=int, default=115200)
 parser.add_argument("--serial-port", default="/dev/cnc_main")
+parser.add_argument("--serial-port-z", default="/dev/cnc_aux",
+                    help="Serial port for Z-axis CNC")
 parser.add_argument("--no-camera", action="store_true", help="Disable camera feed")
 args = parser.parse_args()
 
 # ---------------------------------------------------------------------------
-# CNC setup
+# CNC setup — main (X, Y, A rotational)
 # ---------------------------------------------------------------------------
 cnc = CNCController()
 _port = args.serial_port
@@ -61,9 +64,25 @@ if _port:
 atexit.register(cnc.disconnect)
 
 # ---------------------------------------------------------------------------
+# CNC setup — auxiliary (linear Z up/down)
+# ---------------------------------------------------------------------------
+cnc_z = CNCController()
+_port_z = args.serial_port_z
+if not os.path.exists(_port_z):
+    print(f"[CNC-Z] {_port_z} not found, Z-axis CNC not connected")
+    _port_z = None
+if _port_z:
+    try:
+        cnc_z.connect(_port_z, args.baud)
+    except Exception as e:
+        print(f"[CNC-Z] Connection failed: {e}")
+
+atexit.register(cnc_z.disconnect)
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
-points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "z": float, "timestamp": str}]
+points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "a": float, "timestamp": str}]
 
 # Camera shared state
 camera_available = False
@@ -168,6 +187,7 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     html = INDEX_HTML.replace("__CAMERA_AVAILABLE__", "true" if camera_available else "false")
+    html = html.replace("__Z_CONNECTED__", "true" if cnc_z.connected else "false")
     return html
 
 
@@ -185,6 +205,42 @@ def cnc_status():
     resp["camera_available"] = camera_available
     resp["tag_detected"] = tag_detected
     return jsonify(resp)
+
+
+@app.route("/cnc_z/status")
+def cnc_z_status():
+    if not cnc_z.connected:
+        resp = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
+    else:
+        status = cnc_z.query_status()
+        if status is None:
+            resp = {"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}}
+        else:
+            resp = status
+            resp["connected"] = True
+    return jsonify(resp)
+
+
+@app.route("/cnc_z/jog", methods=["POST"])
+def cnc_z_jog():
+    if not cnc_z.connected:
+        return jsonify({"error": "Z-axis CNC not connected"}), 503
+    body = request.get_json(force=True)
+    direction = body.get("dir", "up")
+    dist = float(body.get("dist", 1.0))
+    feed = float(body.get("feed", 300))
+    if direction == "down":
+        dist = -dist
+    result = cnc_z.send_line(f"$J=G91 G21 Z{dist} F{feed}")
+    return jsonify({"ok": result is True, "result": str(result)})
+
+
+@app.route("/cnc_z/jog/cancel", methods=["POST"])
+def cnc_z_jog_cancel():
+    if not cnc_z.connected:
+        return jsonify({"error": "Z-axis CNC not connected"}), 503
+    cnc_z.jog_cancel()
+    return jsonify({"ok": True})
 
 
 @app.route("/feed")
@@ -237,7 +293,7 @@ def capture():
         "type": pt_type,
         "x": cnc_pos["x"],
         "y": cnc_pos["y"],
-        "z": cnc_pos["z"],
+        "a": cnc_pos["z"],
         "timestamp": datetime.now().isoformat(),
     }
     points.append(point)
@@ -290,11 +346,13 @@ def import_json():
     for p in body:
         if not isinstance(p, dict):
             continue
+        # Accept "a" key, fall back to "z" for backwards compatibility
+        a_val = p.get("a", p.get("z", 0))
         points.append({
             "type": p.get("type", "inside"),
             "x": float(p.get("x", 0)),
             "y": float(p.get("y", 0)),
-            "z": float(p.get("z", 0)),
+            "a": float(a_val),
             "timestamp": p.get("timestamp", datetime.now().isoformat()),
         })
         imported += 1
@@ -365,6 +423,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .btn-clear   { background: #f44336; color: #fff; }
   .btn-export  { background: #9c27b0; color: #fff; }
   .btn-import  { background: #3f51b5; color: #fff; }
+  .btn-jog-up, .btn-jog-down { background: #009688; color: #fff; }
+  .btn-jog-up:disabled, .btn-jog-down:disabled { background: #444; color: #777; cursor: not-allowed; opacity: 0.6; }
+  .z-section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #333;
+                     padding-top: 8px; margin-top: 2px; }
+  .z-conn { font-size: 0.75rem; }
 
   .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
          padding: 1px 7px; font-family: monospace; font-size: 0.75rem; color: #aaa; }
@@ -393,7 +456,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <h1>String Hole Capture</h1>
 
 <div class="status-bar">
-  <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? Z(angle)=?.??&deg;</span></span>
+  <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? A(angle)=?.??&deg;</span></span>
+  <span style="color:#666; margin-left:4px;">|</span>
+  <span class="pos" id="cnc-z-pos">Z: --</span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
   <span id="tag-status" style="margin-left:auto"></span>
@@ -420,6 +485,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <button class="btn-export" onclick="exportJSON()">Export</button>
     <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
     <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+    <div class="z-section-label">Z Axis <span class="z-conn" id="z-conn-label">(disconnected)</span></div>
+    <button class="btn-jog-up" id="btn-jog-up" onclick="jogZ('up')" disabled>&#x25B2; Up</button>
+    <button class="btn-jog-down" id="btn-jog-down" onclick="jogZ('down')" disabled>&#x25BC; Down</button>
   </div>
 </div>
 
@@ -431,7 +499,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <div class="panel panel-table">
     <h3>Captured Points</h3>
     <table>
-      <thead><tr><th>#</th><th>Type</th><th>X</th><th>Y</th><th>Z&deg;</th><th>Time</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Type</th><th>X</th><th>Y</th><th>A&deg;</th><th>Time</th><th></th></tr></thead>
       <tbody id="pts-body"></tbody>
     </table>
   </div>
@@ -441,6 +509,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <script>
 const CAMERA_AVAILABLE = __CAMERA_AVAILABLE__;
+let Z_CONNECTED = __Z_CONNECTED__;
 const CAM_W = 1920, CAM_H = 1080;
 let currentType = 'inside';
 let plotInitialized = false;
@@ -516,7 +585,7 @@ function pollCNC() {
   fetch('/cnc/status').then(r => r.json()).then(s => {
     const p = s.wpos;
     document.getElementById('cnc-pos').textContent =
-      `X=${p.x.toFixed(2)} Y=${p.y.toFixed(2)} Z(angle)=${p.z.toFixed(2)}\u00B0`;
+      `X=${p.x.toFixed(2)} Y=${p.y.toFixed(2)} A(angle)=${p.z.toFixed(2)}\u00B0`;
     const st = document.getElementById('cnc-state');
     st.textContent = s.state;
     st.className = 'state state-' + s.state.toLowerCase();
@@ -533,6 +602,22 @@ function pollCNC() {
     } else {
       tagEl.textContent = '';
     }
+  }).catch(() => {});
+
+  // Poll Z-axis CNC
+  fetch('/cnc_z/status').then(r => r.json()).then(s => {
+    Z_CONNECTED = s.connected;
+    const zPosEl = document.getElementById('cnc-z-pos');
+    if (s.connected) {
+      zPosEl.textContent = `Z: ${s.wpos.z.toFixed(2)} mm`;
+    } else {
+      zPosEl.textContent = 'Z: --';
+    }
+    const label = document.getElementById('z-conn-label');
+    label.textContent = s.connected ? '(connected)' : '(disconnected)';
+    label.style.color = s.connected ? '#4caf50' : '#888';
+    document.getElementById('btn-jog-up').disabled = !s.connected;
+    document.getElementById('btn-jog-down').disabled = !s.connected;
   }).catch(() => {});
 }
 setInterval(pollCNC, 500);
@@ -572,7 +657,7 @@ function refreshPoints() {
         `<td class="${badge}">${p.type}</td>` +
         `<td>${p.x.toFixed(2)}</td>` +
         `<td>${p.y.toFixed(2)}</td>` +
-        `<td>${p.z.toFixed(2)}</td>` +
+        `<td>${p.a.toFixed(2)}</td>` +
         `<td>${p.timestamp.slice(11, 19)}</td>` +
         `<td><button class="del-btn" onclick="deletePoint(${i})">&#x2715;</button></td>`;
       tb.appendChild(tr);
@@ -591,7 +676,7 @@ function refreshPlot() {
       y: ins.map(p => p.y),
       text: ins.map((p, i) => {
         const idx = data.indexOf(p) + 1;
-        return `#${idx} (inside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>Z: ${p.z.toFixed(2)}\u00B0`;
+        return `#${idx} (inside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>A: ${p.a.toFixed(2)}\u00B0`;
       }),
       hoverinfo: 'text',
       mode: 'markers',
@@ -604,7 +689,7 @@ function refreshPlot() {
       y: out.map(p => p.y),
       text: out.map((p, i) => {
         const idx = data.indexOf(p) + 1;
-        return `#${idx} (outside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>Z: ${p.z.toFixed(2)}\u00B0`;
+        return `#${idx} (outside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>A: ${p.a.toFixed(2)}\u00B0`;
       }),
       hoverinfo: 'text',
       mode: 'markers',
@@ -681,6 +766,16 @@ function importJSON(input) {
   };
   reader.readAsText(file);
   input.value = '';
+}
+
+// --- Z-axis jog ---
+function jogZ(dir) {
+  if (!Z_CONNECTED) return;
+  fetch('/cnc_z/jog', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({dir: dir, dist: 1.0, feed: 300}),
+  }).then(r => r.json()).catch(() => {});
 }
 
 // --- Keyboard shortcut ---
