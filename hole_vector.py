@@ -681,14 +681,14 @@ INDEX_HTML = """<!DOCTYPE html>
   <div class="panel">
     <h3>Measurements</h3>
     <table>
-      <thead><tr><th>#</th><th>Side</th><th>Circle (cx,cy,r)</th><th>Circ.</th><th>CNC X</th><th>CNC Y</th><th>Z&deg;</th><th>Time</th></tr></thead>
+      <thead><tr><th>#</th><th>Side</th><th>Circle (cx,cy,r)</th><th>Circ.</th><th>CNC X</th><th>CNC Y</th><th>Z&deg;</th><th>Dist</th><th>Time</th></tr></thead>
       <tbody id="meas-body"></tbody>
     </table>
   </div>
   <div class="panel">
     <h3>Computed Vectors</h3>
     <table>
-      <thead><tr><th>#</th><th>Angle</th><th>Vector</th><th>A pos</th><th>B pos</th></tr></thead>
+      <thead><tr><th>#</th><th>Angle</th><th>Vector</th><th>A pos</th><th>B pos</th><th>Dist A/B</th></tr></thead>
       <tbody id="vec-body"></tbody>
     </table>
     <div id="log"></div>
@@ -787,9 +787,10 @@ function refreshMeasurements() {
     data.forEach((m, i) => {
       const tr = document.createElement('tr');
       const circle = m.detected ? `(${m.cx.toFixed(1)}, ${m.cy.toFixed(1)}, ${m.radius.toFixed(1)})` : '--';
+      const zEst = m.z_est != null ? m.z_est.toFixed(1) : '--';
       tr.innerHTML = `<td>${i+1}</td><td>${m.side}</td><td>${circle}</td>` +
         `<td>${m.circularity ?? '--'}</td><td>${m.cnc_x.toFixed(2)}</td><td>${m.cnc_y.toFixed(2)}</td>` +
-        `<td>${m.cnc_z.toFixed(1)}</td><td>${m.timestamp.slice(11, 19)}</td>`;
+        `<td>${m.cnc_z.toFixed(1)}</td><td>${zEst}</td><td>${m.timestamp.slice(11, 19)}</td>`;
       tb.appendChild(tr);
     });
   });
@@ -804,7 +805,9 @@ function refreshVectors() {
       const vec = v.vector.map(n => n.toFixed(3)).join(', ');
       const ap = v.point_a.map(n => n.toFixed(1)).join(', ');
       const bp = v.point_b.map(n => n.toFixed(1)).join(', ');
-      tr.innerHTML = `<td>${i+1}</td><td>${v.angle_deg}&deg;</td><td>(${vec})</td><td>(${ap})</td><td>(${bp})</td>`;
+      const zw = (v.z_working_a != null && v.z_working_b != null)
+        ? `${v.z_working_a.toFixed(1)}/${v.z_working_b.toFixed(1)}` : '--';
+      tr.innerHTML = `<td>${i+1}</td><td>${v.angle_deg}&deg;</td><td>(${vec})</td><td>(${ap})</td><td>(${bp})</td><td>${zw}</td>`;
       tb.appendChild(tr);
     });
   });
