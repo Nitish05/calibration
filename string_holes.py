@@ -12,6 +12,7 @@ detection overlay and hover-to-show world XY tooltip.
 import argparse
 import atexit
 import json
+import os
 import threading
 import time
 from datetime import datetime
@@ -39,7 +40,7 @@ except ImportError:
 parser = argparse.ArgumentParser(description="String hole position capture tool")
 parser.add_argument("--port", type=int, default=5001)
 parser.add_argument("--baud", type=int, default=115200)
-parser.add_argument("--serial-port", default="auto")
+parser.add_argument("--serial-port", default="/dev/cnc_main")
 parser.add_argument("--no-camera", action="store_true", help="Disable camera feed")
 args = parser.parse_args()
 
@@ -48,7 +49,8 @@ args = parser.parse_args()
 # ---------------------------------------------------------------------------
 cnc = CNCController()
 _port = args.serial_port
-if _port == "auto":
+if not os.path.exists(_port):
+    print(f"[CNC] {_port} not found, auto-detecting...")
     _port = CNCController.find_serial_port()
 if _port:
     try:
