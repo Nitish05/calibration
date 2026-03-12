@@ -67,6 +67,8 @@ points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "z": float,
 camera_available = False
 frame_lock = threading.Lock()
 shared_frame = None
+shared_jpeg = None
+frame_event = threading.Event()
 pose_lock = threading.Lock()
 shared_pose = (None, None)
 tag_detected = False
@@ -140,11 +142,15 @@ def camera_thread():
             cv2.putText(frame, "NO TAG", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2)
 
+        _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        jpeg_bytes = jpeg.tobytes()
         with frame_lock:
             shared_frame = frame
+            shared_jpeg = jpeg_bytes
         with pose_lock:
             shared_pose = (R, t)
             tag_detected = R is not None
+        frame_event.set()
 
 
 if camera_available:
@@ -186,15 +192,13 @@ def video_feed():
 
     def generate():
         while True:
+            frame_event.wait()
+            frame_event.clear()
             with frame_lock:
-                frame = shared_frame
-            if frame is None:
-                time.sleep(0.03)
+                data = shared_jpeg
+            if data is None:
                 continue
-            _, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-            data = jpeg.tobytes()
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
-            time.sleep(0.033)
 
     return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")
 
