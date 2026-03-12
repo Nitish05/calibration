@@ -1,0 +1,432 @@
+"""String hole position capture tool.
+
+Manually jog the CNC to string holes on a tennis racket and record
+XYZ positions (Z = rotational axis in degrees).  Points are tagged
+as 'inside' or 'outside' edge and visualised on an interactive 2D
+Plotly scatter plot.
+"""
+
+import argparse
+import atexit
+import json
+from datetime import datetime
+
+from flask import Flask, Response, jsonify, request
+
+from cnc import CNCController
+
+# ---------------------------------------------------------------------------
+# CLI arguments
+# ---------------------------------------------------------------------------
+parser = argparse.ArgumentParser(description="String hole position capture tool")
+parser.add_argument("--port", type=int, default=5001)
+parser.add_argument("--baud", type=int, default=115200)
+parser.add_argument("--serial-port", default="auto")
+args = parser.parse_args()
+
+# ---------------------------------------------------------------------------
+# CNC setup
+# ---------------------------------------------------------------------------
+cnc = CNCController()
+_port = args.serial_port
+if _port == "auto":
+    _port = CNCController.find_serial_port()
+if _port:
+    try:
+        cnc.connect(_port, args.baud)
+    except Exception as e:
+        print(f"[CNC] Connection failed: {e}")
+
+atexit.register(cnc.disconnect)
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "z": float, "timestamp": str}]
+
+# ---------------------------------------------------------------------------
+# Flask app
+# ---------------------------------------------------------------------------
+app = Flask(__name__)
+
+
+@app.route("/")
+def index():
+    return INDEX_HTML
+
+
+@app.route("/cnc/status")
+def cnc_status():
+    if not cnc.connected:
+        return jsonify({"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}})
+    status = cnc.query_status()
+    if status is None:
+        return jsonify({"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}})
+    status["connected"] = True
+    return jsonify(status)
+
+
+@app.route("/capture", methods=["POST"])
+def capture():
+    body = request.get_json(force=True)
+    pt_type = body.get("type", "inside")
+    if pt_type not in ("inside", "outside"):
+        return jsonify({"error": "type must be 'inside' or 'outside'"}), 400
+
+    cnc_pos = {"x": 0.0, "y": 0.0, "z": 0.0}
+    if cnc.connected:
+        status = cnc.query_status()
+        if status:
+            cnc_pos = status["wpos"]
+
+    point = {
+        "type": pt_type,
+        "x": cnc_pos["x"],
+        "y": cnc_pos["y"],
+        "z": cnc_pos["z"],
+        "timestamp": datetime.now().isoformat(),
+    }
+    points.append(point)
+    return jsonify({"point": point, "index": len(points) - 1})
+
+
+@app.route("/points", methods=["GET"])
+def get_points():
+    return jsonify(points)
+
+
+@app.route("/points", methods=["DELETE"])
+def clear_points():
+    points.clear()
+    return jsonify({"status": "cleared"})
+
+
+@app.route("/points/last", methods=["DELETE"])
+def undo_last():
+    if not points:
+        return jsonify({"error": "no points to undo"}), 400
+    removed = points.pop()
+    return jsonify({"removed": removed, "remaining": len(points)})
+
+
+@app.route("/points/<int:idx>", methods=["DELETE"])
+def delete_point(idx):
+    if idx < 0 or idx >= len(points):
+        return jsonify({"error": "index out of range"}), 400
+    removed = points.pop(idx)
+    return jsonify({"removed": removed, "remaining": len(points)})
+
+
+@app.route("/export")
+def export_json():
+    data = json.dumps(points, indent=2)
+    return Response(
+        data,
+        mimetype="application/json",
+        headers={"Content-Disposition": f"attachment; filename=string_holes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"},
+    )
+
+
+@app.route("/import", methods=["POST"])
+def import_json():
+    body = request.get_json(force=True)
+    if not isinstance(body, list):
+        return jsonify({"error": "expected a JSON array of points"}), 400
+    imported = 0
+    for p in body:
+        if not isinstance(p, dict):
+            continue
+        points.append({
+            "type": p.get("type", "inside"),
+            "x": float(p.get("x", 0)),
+            "y": float(p.get("y", 0)),
+            "z": float(p.get("z", 0)),
+            "timestamp": p.get("timestamp", datetime.now().isoformat()),
+        })
+        imported += 1
+    return jsonify({"imported": imported, "total": len(points)})
+
+
+# ---------------------------------------------------------------------------
+# HTML UI
+# ---------------------------------------------------------------------------
+INDEX_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>String Hole Capture</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #1a1a2e; color: #e0e0e0; }
+  h1 { padding: 12px 20px; background: #16213e; font-size: 1.3rem; }
+
+  .status-bar { padding: 10px 20px; background: #0f3460; font-family: monospace;
+                 display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  .status-bar .pos { color: #8ab4f8; }
+  .status-bar .state { font-weight: bold; }
+  .state-idle { color: #4caf50; }
+  .state-run { color: #ff9800; }
+  .state-alarm { color: #f44336; }
+
+  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 20px; }
+  button { padding: 8px 18px; border: none; border-radius: 6px; font-weight: 600;
+           cursor: pointer; font-size: 0.9rem; transition: opacity 0.15s; }
+  button:hover { opacity: 0.85; }
+
+  .type-toggle { display: flex; border-radius: 6px; overflow: hidden; }
+  .type-toggle button { border-radius: 0; padding: 8px 22px; }
+  .btn-inside  { background: #333; color: #aaa; }
+  .btn-outside { background: #333; color: #aaa; }
+  .btn-inside.active  { background: #00bcd4; color: #fff; }
+  .btn-outside.active { background: #ff9800; color: #fff; }
+
+  .btn-capture { background: #4caf50; color: #fff; font-size: 1rem; padding: 8px 28px; }
+  .btn-undo    { background: #607d8b; color: #fff; }
+  .btn-clear   { background: #f44336; color: #fff; }
+  .btn-export  { background: #9c27b0; color: #fff; }
+  .btn-import  { background: #3f51b5; color: #fff; }
+
+  .row { display: flex; gap: 12px; padding: 12px 20px; flex-wrap: wrap; }
+  .panel { background: #16213e; border-radius: 8px; padding: 12px; flex: 1; min-width: 300px; }
+  .panel h3 { margin-bottom: 8px; font-size: 0.95rem; color: #8ab4f8; }
+
+  #plot { width: 100%; height: 500px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #333; }
+  th { color: #8ab4f8; }
+  .del-btn { background: #c62828; color: #fff; border: none; border-radius: 4px;
+             padding: 2px 8px; cursor: pointer; font-size: 0.75rem; }
+  .del-btn:hover { opacity: 0.8; }
+  .badge-inside  { color: #00bcd4; }
+  .badge-outside { color: #ff9800; }
+  .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
+         padding: 1px 7px; font-family: monospace; font-size: 0.8rem; color: #aaa; margin-left: 6px; }
+
+  input[type=file] { display: none; }
+</style>
+</head><body>
+
+<h1>String Hole Capture</h1>
+
+<div class="status-bar">
+  <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? Z(angle)=?.??&deg;</span></span>
+  <span class="state" id="cnc-state">--</span>
+  <span style="color:#666" id="cnc-conn">disconnected</span>
+</div>
+
+<div class="controls">
+  <div class="type-toggle">
+    <button class="btn-inside active" id="btn-inside" onclick="setType('inside')">Inside</button>
+    <button class="btn-outside" id="btn-outside" onclick="setType('outside')">Outside</button>
+  </div>
+  <button class="btn-capture" onclick="capturePoint()">Capture</button>
+  <span class="kbd">Space</span>
+  <button class="btn-undo" onclick="undoLast()">Undo</button>
+  <button class="btn-clear" onclick="clearAll()">Clear All</button>
+  <button class="btn-export" onclick="exportJSON()">Export</button>
+  <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
+  <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+</div>
+
+<div class="row">
+  <div class="panel" style="flex:2">
+    <h3>Scatter Plot (X vs Y)</h3>
+    <div id="plot"></div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="panel">
+    <h3>Captured Points</h3>
+    <table>
+      <thead><tr><th>#</th><th>Type</th><th>X</th><th>Y</th><th>Z&deg;</th><th>Time</th><th></th></tr></thead>
+      <tbody id="pts-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let currentType = 'inside';
+let plotInitialized = false;
+
+// --- CNC polling ---
+function pollCNC() {
+  fetch('/cnc/status').then(r => r.json()).then(s => {
+    const p = s.wpos;
+    document.getElementById('cnc-pos').textContent =
+      `X=${p.x.toFixed(2)} Y=${p.y.toFixed(2)} Z(angle)=${p.z.toFixed(2)}\u00B0`;
+    const st = document.getElementById('cnc-state');
+    st.textContent = s.state;
+    st.className = 'state state-' + s.state.toLowerCase();
+    document.getElementById('cnc-conn').textContent = s.connected ? 'connected' : 'disconnected';
+  }).catch(() => {});
+}
+setInterval(pollCNC, 500);
+pollCNC();
+
+// --- Type toggle ---
+function setType(t) {
+  currentType = t;
+  document.getElementById('btn-inside').className =
+    'btn-inside' + (t === 'inside' ? ' active' : '');
+  document.getElementById('btn-outside').className =
+    'btn-outside' + (t === 'outside' ? ' active' : '');
+}
+
+// --- Capture ---
+function capturePoint() {
+  fetch('/capture', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({type: currentType}),
+  }).then(r => r.json()).then(data => {
+    if (data.error) { alert(data.error); return; }
+    refreshPoints();
+    refreshPlot();
+  }).catch(e => alert('Capture failed: ' + e));
+}
+
+// --- Refresh table ---
+function refreshPoints() {
+  fetch('/points').then(r => r.json()).then(data => {
+    const tb = document.getElementById('pts-body');
+    tb.innerHTML = '';
+    data.forEach((p, i) => {
+      const tr = document.createElement('tr');
+      const badge = p.type === 'inside' ? 'badge-inside' : 'badge-outside';
+      tr.innerHTML = `<td>${i + 1}</td>` +
+        `<td class="${badge}">${p.type}</td>` +
+        `<td>${p.x.toFixed(2)}</td>` +
+        `<td>${p.y.toFixed(2)}</td>` +
+        `<td>${p.z.toFixed(2)}</td>` +
+        `<td>${p.timestamp.slice(11, 19)}</td>` +
+        `<td><button class="del-btn" onclick="deletePoint(${i})">&#x2715;</button></td>`;
+      tb.appendChild(tr);
+    });
+  });
+}
+
+// --- Refresh plot ---
+function refreshPlot() {
+  fetch('/points').then(r => r.json()).then(data => {
+    const ins = data.filter(p => p.type === 'inside');
+    const out = data.filter(p => p.type === 'outside');
+
+    const traceIn = {
+      x: ins.map(p => p.x),
+      y: ins.map(p => p.y),
+      text: ins.map((p, i) => {
+        const idx = data.indexOf(p) + 1;
+        return `#${idx} (inside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>Z: ${p.z.toFixed(2)}\u00B0`;
+      }),
+      hoverinfo: 'text',
+      mode: 'markers',
+      type: 'scatter',
+      name: 'Inside',
+      marker: { color: '#00bcd4', size: 10, symbol: 'circle' },
+    };
+    const traceOut = {
+      x: out.map(p => p.x),
+      y: out.map(p => p.y),
+      text: out.map((p, i) => {
+        const idx = data.indexOf(p) + 1;
+        return `#${idx} (outside)<br>X: ${p.x.toFixed(2)} mm<br>Y: ${p.y.toFixed(2)} mm<br>Z: ${p.z.toFixed(2)}\u00B0`;
+      }),
+      hoverinfo: 'text',
+      mode: 'markers',
+      type: 'scatter',
+      name: 'Outside',
+      marker: { color: '#ff9800', size: 10, symbol: 'diamond' },
+    };
+
+    const layout = {
+      paper_bgcolor: '#16213e',
+      plot_bgcolor: '#16213e',
+      font: { color: '#e0e0e0' },
+      xaxis: { title: 'X (mm)', gridcolor: '#333', zerolinecolor: '#555',
+               scaleanchor: 'y', scaleratio: 1 },
+      yaxis: { title: 'Y (mm)', gridcolor: '#333', zerolinecolor: '#555' },
+      legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0.3)' },
+      margin: { l: 60, r: 20, t: 20, b: 50 },
+    };
+
+    Plotly.react('plot', [traceIn, traceOut], layout);
+    plotInitialized = true;
+  });
+}
+
+// --- Undo ---
+function undoLast() {
+  fetch('/points/last', {method: 'DELETE'}).then(r => r.json()).then(data => {
+    if (data.error) return;
+    refreshPoints();
+    refreshPlot();
+  });
+}
+
+// --- Clear ---
+function clearAll() {
+  if (!confirm('Clear all captured points?')) return;
+  fetch('/points', {method: 'DELETE'}).then(() => {
+    refreshPoints();
+    refreshPlot();
+  });
+}
+
+// --- Delete specific ---
+function deletePoint(i) {
+  fetch(`/points/${i}`, {method: 'DELETE'}).then(r => r.json()).then(data => {
+    if (data.error) return;
+    refreshPoints();
+    refreshPlot();
+  });
+}
+
+// --- Export ---
+function exportJSON() {
+  window.location.href = '/export';
+}
+
+// --- Import ---
+function importJSON(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    let data;
+    try { data = JSON.parse(e.target.result); } catch { alert('Invalid JSON file'); return; }
+    fetch('/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(data),
+    }).then(r => r.json()).then(res => {
+      if (res.error) { alert(res.error); return; }
+      refreshPoints();
+      refreshPlot();
+    }).catch(err => alert('Import failed: ' + err));
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+// --- Keyboard shortcut ---
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    e.preventDefault();
+    capturePoint();
+  }
+});
+
+// Initial load
+refreshPoints();
+refreshPlot();
+</script>
+</body></html>"""
+
+
+if __name__ == "__main__":
+    print(f"Starting string hole capture tool on http://localhost:{args.port}")
+    app.run(host="0.0.0.0", port=args.port, threaded=True)
