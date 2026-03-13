@@ -1290,9 +1290,10 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
   body { font-family: 'Fira Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
          background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column;
-         height: 100vh; height: 100dvh; overflow: hidden; }
+         overflow: hidden; }
 
   h1 { padding: 10px 20px; background: #16213e; font-size: 1.2rem; display: flex; align-items: center; gap: 16px; }
   h1 .status-info { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #8ab4f8; }
@@ -1360,8 +1361,9 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   .ctx-menu .sep:hover { background: #333; }
 
   /* Toolbar */
-  .toolbar { display: flex; gap: 8px; padding: 10px 16px; background: #16213e;
-             border-top: 1px solid #333; align-items: center; flex-wrap: wrap; }
+  .toolbar { display: flex; gap: 8px; padding: 10px 16px 14px; background: #16213e;
+             border-top: 1px solid #333; align-items: center; flex-wrap: wrap;
+             flex-shrink: 0; }
   .toolbar button { padding: 7px 16px; border: none; border-radius: 6px; font-weight: 600;
                     font-size: 0.82rem; cursor: pointer; transition: opacity 0.15s; }
   .toolbar button:hover { opacity: 0.85; }
@@ -1425,6 +1427,7 @@ const BLOCK_TYPES = {
   'cnc-goto': {
     name: 'CNC Go To', category: 'CNC', color: '#1565C0',
     params: [
+      { key: 'point', label: 'Point', type: 'point-select' },
       { key: 'x', label: 'X', type: 'number', default: 0, step: 0.1 },
       { key: 'y', label: 'Y', type: 'number', default: 0, step: 0.1 },
       { key: 'a', label: 'A', type: 'number', default: 0, step: 0.1 },
@@ -1557,6 +1560,7 @@ let clipboard = [];
 let stopFlag = false;
 let running = false;
 let loadedMacros = [];
+let cachedPoints = [];  // [{type, x, y, a, timestamp}]
 
 // =========================================================================
 // Palette rendering
@@ -1638,7 +1642,37 @@ function renderBlock(b, idx) {
       const lbl = document.createElement('label');
       lbl.textContent = p.label + ' ';
       let inp;
-      if (p.type === 'select') {
+      if (p.type === 'point-select') {
+        inp = document.createElement('select');
+        const none = document.createElement('option');
+        none.value = ''; none.textContent = '-- manual --';
+        inp.appendChild(none);
+        cachedPoints.forEach((pt, i) => {
+          const opt = document.createElement('option');
+          opt.value = i;
+          opt.textContent = `#${i+1} ${pt.type} (${pt.x.toFixed(1)}, ${pt.y.toFixed(1)}, ${pt.a.toFixed(1)})`;
+          if (b.params.point !== undefined && +b.params.point === i) opt.selected = true;
+          inp.appendChild(opt);
+        });
+        inp.style.width = 'auto'; inp.style.minWidth = '140px';
+        inp.dataset.paramKey = 'point';
+        inp.dataset.blockId = b.id;
+        inp.addEventListener('change', (e) => {
+          const block = blocks.find(x => x.id == e.target.dataset.blockId);
+          if (!block) return;
+          const idx = e.target.value;
+          block.params.point = idx;
+          if (idx !== '' && cachedPoints[+idx]) {
+            const pt = cachedPoints[+idx];
+            block.params.x = pt.x; block.params.y = pt.y; block.params.a = pt.a;
+          }
+          autoSave();
+          renderAllBlocks();
+        });
+        lbl.appendChild(inp);
+        body.appendChild(lbl);
+        continue;
+      } else if (p.type === 'select') {
         inp = document.createElement('select');
         const opts = p.key === 'name' && b.type === 'macro' ? macroNames() : p.options;
         for (const o of opts) {
@@ -2044,6 +2078,16 @@ function handleImport(event) {
 }
 
 // =========================================================================
+// Captured points
+// =========================================================================
+async function loadPoints() {
+  try {
+    const r = await fetch('/points');
+    cachedPoints = await r.json();
+  } catch (e) { cachedPoints = []; }
+}
+
+// =========================================================================
 // Status polling
 // =========================================================================
 async function pollStatus() {
@@ -2065,7 +2109,7 @@ setInterval(pollStatus, 1000);
 // Init
 // =========================================================================
 autoLoad();
-loadMacros();   // also calls buildPalette + renderAllBlocks
+loadPoints().then(() => loadMacros());   // loadMacros also calls buildPalette + renderAllBlocks
 initCanvasSortable();
 pollStatus();
 </script>
