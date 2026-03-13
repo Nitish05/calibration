@@ -1734,6 +1734,7 @@ const BLOCK_TYPES = {
 let blocks = [];        // [{id, type, params:{}}]
 let nextId = 1;
 let selectedIds = new Set();
+let macroPreviewOpen = new Set();  // block ids with expanded macro preview
 let clipboard = [];
 let stopFlag = false;
 let running = false;
@@ -1910,8 +1911,14 @@ function renderBlock(b, idx) {
           (paramStr ? '<span class="mp-params">' + paramStr.trim() + '</span>' : '');
         list.appendChild(item);
       });
+      if (macroPreviewOpen.has(b.id)) {
+        toggleBtn.classList.add('open');
+        list.classList.add('open');
+      }
       toggleBtn.addEventListener('click', (e) => {
         e.stopPropagation();
+        if (macroPreviewOpen.has(b.id)) macroPreviewOpen.delete(b.id);
+        else macroPreviewOpen.add(b.id);
         toggleBtn.classList.toggle('open');
         list.classList.toggle('open');
       });
@@ -2047,8 +2054,9 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Click on canvas background to deselect
+// Click on canvas background to deselect (skip if we just panned)
 document.getElementById('canvas').addEventListener('click', (e) => {
+  if (didPan) { didPan = false; return; }
   if (e.target.id === 'canvas' || e.target.id === 'canvas-inner') {
     selectedIds.clear();
     renderAllBlocks();
@@ -2322,7 +2330,7 @@ setInterval(pollStatus, 1000);
 // =========================================================================
 let panX = 0, panY = 0, zoom = 1;
 const ZOOM_MIN = 0.25, ZOOM_MAX = 3, ZOOM_STEP = 0.1;
-let isPanning = false, panStartX = 0, panStartY = 0, panStartPX = 0, panStartPY = 0;
+let isPanning = false, didPan = false, panStartX = 0, panStartY = 0, panStartPX = 0, panStartPY = 0;
 
 function applyTransform() {
   const inner = document.getElementById('canvas-inner');
@@ -2370,7 +2378,7 @@ function zoomBy(delta) {
     const isLeftOnBg = e.button === 0 && (e.target.id === 'canvas' || e.target.id === 'canvas-inner');
     if (!isMiddle && !isLeftOnBg) return;
     e.preventDefault();
-    isPanning = true;
+    isPanning = true; didPan = false;
     panStartX = e.clientX; panStartY = e.clientY;
     panStartPX = panX; panStartPY = panY;
     cvs.classList.add('panning');
@@ -2378,6 +2386,7 @@ function zoomBy(delta) {
 
   window.addEventListener('mousemove', (e) => {
     if (!isPanning) return;
+    didPan = true;
     panX = panStartPX + (e.clientX - panStartX);
     panY = panStartPY + (e.clientY - panStartY);
     applyTransform();
