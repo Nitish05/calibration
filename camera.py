@@ -55,12 +55,11 @@ class Camera:
 
         if device is None:
             device = self.find_usb_camera() or 0
-        # OpenCV needs an integer index (not path string) for FOURCC/resolution
-        # changes to work via the V4L2 backend
-        if isinstance(device, str):
-            m = re.search(r"video(\d+)", device)
-            device = int(m.group(1)) if m else device
-        self._cap = cv2.VideoCapture(device)
+        # Open by path with explicit V4L2 backend — integer indices don't
+        # map to /dev/videoN reliably on Pi 5 due to ISP devices.
+        if isinstance(device, int):
+            device = f"/dev/video{device}"
+        self._cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
         # Set MJPEG format first — C920 only does 1080p via MJPEG, not YUYV
         self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
