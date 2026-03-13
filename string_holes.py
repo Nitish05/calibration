@@ -1287,123 +1287,186 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Block Sequencer</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
-  body { font-family: 'Fira Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column;
-         overflow: hidden; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #0b1121; color: #e2e8f0; display: flex; flex-direction: column;
+         overflow: hidden; font-size: 14px; }
 
-  h1 { padding: 10px 20px; background: #16213e; font-size: 1.2rem; display: flex; align-items: center; gap: 16px; }
-  h1 .status-info { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #8ab4f8; }
-  h1 .nav-links { margin-left: auto; display: flex; gap: 12px; }
-  h1 .nav-links a { color: #8ab4f8; text-decoration: none; font-size: 0.85rem; font-weight: 600; }
-  h1 .nav-links a:hover { text-decoration: underline; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: #475569; }
 
-  .workspace { display: flex; flex: 1; overflow: hidden; }
+  /* Header */
+  header { height: 48px; background: #0f172a; border-bottom: 1px solid #1e293b; display: flex;
+           align-items: center; justify-content: space-between; padding: 0 16px; flex-shrink: 0;
+           box-shadow: 0 1px 3px rgba(0,0,0,0.3); z-index: 10; }
+  header h1 { font-size: 0.95rem; font-weight: 600; color: #e2e8f0; }
+  header .status-info { font-family: 'Fira Code', monospace; font-size: 0.75rem; color: #94a3b8;
+                         display: flex; gap: 20px; }
+  header .status-info .val { color: #e2e8f0; margin-left: 4px; }
+  header .status-info .state { color: #64748b; margin-left: 4px; }
+  header .nav-links { display: flex; gap: 10px; }
+  header .nav-links a { color: #94a3b8; text-decoration: none; font-size: 0.8rem; font-weight: 500;
+                         padding: 4px 10px; border-radius: 4px; transition: all 0.15s; }
+  header .nav-links a:hover { color: #e2e8f0; background: #1e293b; }
 
-  /* Palette sidebar */
-  .palette { width: 220px; min-width: 220px; background: #0f3460; overflow-y: auto;
-             padding: 10px; border-right: 1px solid #333; }
-  .palette-category { margin-bottom: 14px; }
-  .palette-category h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px;
-                          color: #888; margin-bottom: 6px; padding: 0 4px; }
-  .palette-block { background: #16213e; border-radius: 6px; padding: 8px 10px; margin-bottom: 5px;
-                   cursor: grab; font-size: 0.8rem; font-weight: 600; border-top: 3px solid;
-                   opacity: 0.85; transition: opacity 0.15s; user-select: none; }
-  .palette-block:hover { opacity: 1; }
-  .palette-block.sortable-ghost { opacity: 0.4; }
+  /* Main workspace */
+  main { flex: 1; display: flex; overflow: hidden; }
 
-  /* Canvas */
+  /* Sidebar */
+  .sidebar { width: 240px; min-width: 240px; display: flex; flex-direction: column;
+             background: rgba(15,23,42,0.8); backdrop-filter: blur(10px);
+             border: 1px solid #1e293b; border-radius: 10px; margin: 12px;
+             overflow: hidden; z-index: 10; flex-shrink: 0; }
+  .sidebar-header { padding: 14px 16px; border-bottom: 1px solid #1e293b;
+                     background: rgba(15,23,42,0.5); }
+  .sidebar-header h2 { font-size: 0.85rem; font-weight: 500; color: #cbd5e1; }
+  .sidebar-body { flex: 1; overflow-y: auto; padding: 12px; }
+  .palette-category { margin-bottom: 16px; }
+  .palette-category h3 { font-size: 0.68rem; font-weight: 600; color: #64748b; text-transform: uppercase;
+                          letter-spacing: 1.2px; margin-bottom: 8px; padding: 0 4px; }
+  .palette-list { padding: 8px; background: rgba(30,41,59,0.3); border-radius: 8px;
+                  border: 1px solid rgba(51,65,85,0.5); display: flex; flex-direction: column; gap: 6px; }
+  .palette-block { padding: 8px 12px; border-radius: 6px; font-size: 0.8rem; font-weight: 500;
+                   color: #fff; cursor: grab; user-select: none; text-align: center;
+                   transition: all 0.15s; border: 1px solid; }
+  .palette-block:hover { filter: brightness(1.15); }
+  .palette-block.sortable-ghost { opacity: 0.3; }
+  .pal-blue { background: #2563eb; border-color: #3b82f6; }
+  .pal-green { background: #059669; border-color: #34d399; }
+  .pal-amber { background: #d97706; border-color: #f59e0b; }
+  .pal-purple { background: #7c3aed; border-color: #a78bfa; }
+
+  /* Canvas area */
   .canvas-wrap { flex: 1; position: relative; overflow: hidden; }
-  .canvas { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; position: relative; cursor: grab;
-            background-image: radial-gradient(circle, #2a2a4e 1px, transparent 1px);
-            background-size: 24px 24px; }
+  .canvas { width: 100%; height: 100%; overflow: hidden; position: relative; cursor: grab;
+            background-color: #0b1121;
+            background-image: linear-gradient(to right, #1e293b 1px, transparent 1px),
+                              linear-gradient(to bottom, #1e293b 1px, transparent 1px);
+            background-size: 20px 20px; }
   .canvas.panning { cursor: grabbing; }
   .canvas-inner { position: absolute; top: 0; left: 0; transform-origin: 0 0;
-                  min-width: 200px; padding: 16px; }
-  .canvas-empty { color: #555; text-align: center; padding-top: 80px; font-size: 0.95rem;
+                  width: 460px; padding: 40px 16px 80px; }
+  .canvas-empty { color: #475569; text-align: center; padding-top: 120px; font-size: 0.9rem;
                   position: absolute; top: 0; left: 0; right: 0; pointer-events: none; z-index: 1; }
-  .zoom-controls { position: absolute; bottom: 10px; right: 10px; display: flex; gap: 0;
-                   background: #16213e; border: 1px solid #333; border-radius: 6px; z-index: 2;
-                   font-family: 'Fira Code', monospace; user-select: none; overflow: hidden; }
-  .zoom-controls button, .zoom-controls span { background: none; border: none; color: #888;
-                   font-size: 0.78rem; padding: 5px 10px; cursor: pointer; }
-  .zoom-controls button:hover { background: #0f3460; color: #ccc; }
-  .zoom-controls span { cursor: pointer; min-width: 44px; text-align: center; border-left: 1px solid #333;
-                        border-right: 1px solid #333; }
-  .zoom-controls span:hover { color: #ccc; }
-  .canvas-inner .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
-                         transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
-  .canvas-inner .block.selected { box-shadow: 0 0 0 2px #4caf50; }
-  .canvas-inner .block.running { box-shadow: 0 0 0 2px #ff9800; animation: pulse 1s infinite; }
-  .canvas-inner .block.error { box-shadow: 0 0 0 2px #f44336; }
-  .canvas-inner .block.done { opacity: 0.5; }
-  .canvas-inner .block .block-header { padding: 8px 12px; font-size: 0.8rem; font-weight: 700;
-                                  cursor: grab; display: flex; align-items: center; gap: 8px;
-                                  user-select: none; border-radius: 4px 4px 0 0; }
-  .canvas-inner .block .block-header .grip { color: #666; font-size: 0.7rem; }
-  .canvas-inner .block .block-header .block-title { flex: 1; }
-  .canvas-inner .block .block-header .block-num { color: #666; font-size: 0.7rem; }
-  .canvas-inner .block .block-header .btn-del { background: none; border: none; color: #f44336;
-                                           cursor: pointer; font-size: 1rem; padding: 0 4px;
-                                           opacity: 0.5; }
-  .canvas-inner .block .block-header .btn-del:hover { opacity: 1; }
-  .canvas-inner .block .block-body { padding: 6px 12px 10px; display: flex; flex-wrap: wrap; gap: 8px; }
-  .canvas-inner .block .block-body label { font-size: 0.75rem; color: #aaa; display: flex;
-                                      align-items: center; gap: 4px; }
-  .canvas-inner .block .block-body input,
-  .canvas-inner .block .block-body select { background: #0d1b3e; border: 1px solid #333; border-radius: 4px;
-                                       color: #e0e0e0; padding: 4px 6px; font-size: 0.8rem;
-                                       font-family: 'Fira Code', monospace; width: 80px; }
-  .canvas-inner .block .block-body select { width: auto; min-width: 80px; }
-  .canvas-inner .block.sortable-ghost { opacity: 0.3; }
+
+  /* Zoom controls */
+  .zoom-controls { position: absolute; bottom: 14px; right: 14px; display: flex;
+                   background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; z-index: 2;
+                   font-family: 'Fira Code', monospace; user-select: none; overflow: hidden;
+                   box-shadow: 0 2px 8px rgba(0,0,0,0.4); }
+  .zoom-controls button, .zoom-controls span { background: none; border: none; color: #64748b;
+                   font-size: 0.78rem; padding: 6px 12px; cursor: pointer; transition: all 0.15s; }
+  .zoom-controls button:hover { background: #1e293b; color: #e2e8f0; }
+  .zoom-controls span { cursor: pointer; min-width: 48px; text-align: center;
+                        border-left: 1px solid #1e293b; border-right: 1px solid #1e293b; }
+  .zoom-controls span:hover { color: #e2e8f0; }
+
+  /* Block cards */
+  .block { border-radius: 12px; margin-bottom: 12px; padding: 14px 16px; position: relative;
+           transition: all 0.2s; }
+  .block.selected { box-shadow: 0 0 0 2px #22c55e, 0 4px 15px rgba(34,197,94,0.2) !important; }
+  .block.running { animation: pulse 1.2s ease-in-out infinite; }
+  .block.error { box-shadow: 0 0 0 2px #ef4444, 0 4px 15px rgba(239,68,68,0.2) !important; }
+  .block.done { opacity: 0.45; }
+  .block.sortable-ghost { opacity: 0.25; }
+
+  .block-blue { background: linear-gradient(135deg, rgba(37,99,235,0.2), rgba(30,58,138,0.4));
+                border: 1px solid rgba(59,130,246,0.5); box-shadow: 0 4px 15px rgba(37,99,235,0.15); }
+  .block-green { background: linear-gradient(135deg, rgba(16,185,129,0.15), rgba(6,78,59,0.4));
+                 border: 1px solid rgba(52,211,153,0.4); box-shadow: 0 4px 15px rgba(16,185,129,0.1); }
+  .block-amber { background: linear-gradient(135deg, rgba(245,158,11,0.15), rgba(120,53,15,0.4));
+                 border: 1px solid rgba(251,191,36,0.4); box-shadow: 0 4px 15px rgba(245,158,11,0.1); }
+  .block-purple { background: linear-gradient(135deg, rgba(139,92,246,0.15), rgba(76,29,149,0.4));
+                  border: 1px solid rgba(167,139,250,0.4); box-shadow: 0 4px 15px rgba(139,92,246,0.1); }
+
+  .block .block-header { display: flex; align-items: center; justify-content: space-between;
+                          margin-bottom: 12px; cursor: grab; user-select: none; }
+  .block .block-header .block-title { font-size: 0.85rem; font-weight: 600; display: flex;
+                                       align-items: center; gap: 8px; }
+  .block .block-header .block-title svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .block .block-header .btn-del { background: none; border: none; color: #64748b; cursor: pointer;
+                                   padding: 2px; transition: color 0.15s; }
+  .block .block-header .btn-del:hover { color: #f87171; }
+  .block .block-header .btn-del svg { width: 14px; height: 14px; }
+  .title-blue { color: #93c5fd; }
+  .title-green { color: #6ee7b7; }
+  .title-amber { color: #fcd34d; }
+  .title-purple { color: #c4b5fd; }
+
+  .block .block-body { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .block .block-body label { font-size: 0.8rem; color: #cbd5e1; display: flex;
+                              align-items: center; gap: 6px; }
+  .block .block-body input,
+  .block .block-body select { background: rgba(0,0,0,0.5); border: 1px solid #334155; border-radius: 4px;
+                               color: #fff; padding: 5px 8px; font-size: 0.8rem;
+                               font-family: 'Fira Code', monospace; width: 72px; }
+  .block .block-body input:focus,
+  .block .block-body select:focus { outline: none; border-color: #64748b; }
+  .block .block-body select { width: auto; min-width: 80px; appearance: none;
+    background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%2394a3b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e");
+    background-position: right 4px center; background-repeat: no-repeat; background-size: 1.2em;
+    padding-right: 22px; }
 
   @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 2px #ff9800; }
-    50% { box-shadow: 0 0 12px 2px #ff9800; }
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.3); }
   }
 
   /* Context menu */
-  .ctx-menu { position: fixed; background: #16213e; border: 1px solid #444; border-radius: 6px;
-              padding: 4px 0; z-index: 1000; display: none; min-width: 160px;
-              box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
-  .ctx-menu div { padding: 7px 16px; font-size: 0.82rem; cursor: pointer; }
-  .ctx-menu div:hover { background: #0f3460; }
-  .ctx-menu .sep { height: 1px; background: #333; margin: 4px 0; padding: 0; cursor: default; }
-  .ctx-menu .sep:hover { background: #333; }
+  .ctx-menu { position: fixed; background: #0f172a; border: 1px solid #1e293b; border-radius: 8px;
+              padding: 4px 0; z-index: 1000; display: none; min-width: 170px;
+              box-shadow: 0 8px 24px rgba(0,0,0,0.6); backdrop-filter: blur(8px); }
+  .ctx-menu div { padding: 8px 16px; font-size: 0.8rem; cursor: pointer; color: #cbd5e1;
+                  transition: background 0.1s; }
+  .ctx-menu div:hover { background: #1e293b; color: #fff; }
+  .ctx-menu .sep { height: 1px; background: #1e293b; margin: 4px 0; padding: 0; cursor: default; }
+  .ctx-menu .sep:hover { background: #1e293b; }
 
-  /* Toolbar */
-  .toolbar { display: flex; gap: 8px; padding: 10px 16px 14px; background: #16213e;
-             border-top: 1px solid #333; align-items: center; flex-wrap: wrap;
-             flex-shrink: 0; }
-  .toolbar button { padding: 7px 16px; border: none; border-radius: 6px; font-weight: 600;
-                    font-size: 0.82rem; cursor: pointer; transition: opacity 0.15s; }
-  .toolbar button:hover { opacity: 0.85; }
-  .btn-play { background: #4caf50; color: #fff; }
-  .btn-stop { background: #f44336; color: #fff; }
-  .btn-save { background: #1565C0; color: #fff; }
-  .btn-load { background: #0f3460; color: #e0e0e0; border: 1px solid #444 !important; }
-  .btn-export { background: #6A1B9A; color: #fff; }
-  .btn-import { background: #0f3460; color: #e0e0e0; border: 1px solid #444 !important; }
-  .toolbar .spacer { flex: 1; }
-  .toolbar .run-status { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #aaa; }
+  /* Footer toolbar */
+  footer { height: 56px; background: #0f172a; border-top: 1px solid #1e293b; display: flex;
+           align-items: center; justify-content: space-between; padding: 0 16px; flex-shrink: 0;
+           box-shadow: 0 -2px 8px rgba(0,0,0,0.2); z-index: 20; }
+  footer .left, footer .right { display: flex; align-items: center; gap: 10px; }
+  footer button { display: flex; align-items: center; gap: 6px; padding: 8px 18px; border: 1px solid;
+                  border-radius: 8px; font-weight: 500; font-size: 0.82rem; cursor: pointer;
+                  transition: all 0.15s; }
+  footer button:hover { filter: brightness(1.15); }
+  footer button:disabled { opacity: 0.4; cursor: not-allowed; filter: none; }
+  footer button svg { width: 14px; height: 14px; flex-shrink: 0; }
+  .btn-play { background: #059669; border-color: #34d399; color: #fff; }
+  .btn-stop { background: #dc2626; border-color: #f87171; color: #fff; }
+  .btn-save { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+  .btn-load { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+  .btn-export { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+  .btn-import { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+  footer .run-status { font-family: 'Fira Code', monospace; font-size: 0.78rem; color: #64748b;
+                       flex: 1; text-align: center; }
 </style>
 </head><body>
 
-<h1>
-  Block Sequencer
-  <span class="status-info" id="status-info">CNC: -- | Arduino: --</span>
-  <span class="nav-links">
+<header>
+  <h1>Block Sequencer</h1>
+  <div class="status-info">
+    <span id="status-info">CNC: -- | Arduino: --</span>
+  </div>
+  <div class="nav-links">
     <a href="/">&larr; Capture</a>
     <a href="/navigator">Navigator</a>
-  </span>
-</h1>
+  </div>
+</header>
 
-<div class="workspace">
-  <div class="palette" id="palette"></div>
-  <div class="canvas-wrap">
+<main>
+  <aside class="sidebar">
+    <div class="sidebar-header"><h2>Action Blocks</h2></div>
+    <div class="sidebar-body" id="palette"></div>
+  </aside>
+  <section class="canvas-wrap">
     <div class="canvas-empty" id="canvas-empty">Drag blocks from the palette to build a sequence</div>
     <div class="canvas" id="canvas">
       <div class="canvas-inner" id="canvas-inner"></div>
@@ -1413,20 +1476,34 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
       <span id="zoom-badge" onclick="resetView()" title="Reset view">100%</span>
       <button onclick="zoomBy(ZOOM_STEP)" title="Zoom in">&plus;</button>
     </div>
-  </div>
-</div>
+  </section>
+</main>
 
-<div class="toolbar">
-  <button class="btn-play" id="btn-play" onclick="runSequence()">&#9654; Play</button>
-  <button class="btn-stop" id="btn-stop" onclick="stopSequence()" disabled>&#9632; Stop</button>
-  <span class="spacer"></span>
+<footer>
+  <div class="left">
+    <button class="btn-play" id="btn-play" onclick="runSequence()">
+      <svg fill="currentColor" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Play
+    </button>
+    <button class="btn-stop" id="btn-stop" onclick="stopSequence()" disabled>
+      <svg fill="currentColor" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"></rect></svg> Stop
+    </button>
+  </div>
   <span class="run-status" id="run-status"></span>
-  <span class="spacer"></span>
-  <button class="btn-save" onclick="saveSequence()">Save</button>
-  <button class="btn-load" onclick="showLoadDialog()">Load</button>
-  <button class="btn-export" onclick="exportSequence()">Export</button>
-  <button class="btn-import" onclick="importSequence()">Import</button>
-</div>
+  <div class="right">
+    <button class="btn-save" onclick="saveSequence()">
+      <svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg> Save
+    </button>
+    <button class="btn-load" onclick="showLoadDialog()">
+      <svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Load
+    </button>
+    <button class="btn-export" onclick="exportSequence()">
+      <svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Export
+    </button>
+    <button class="btn-import" onclick="importSequence()">
+      <svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Import
+    </button>
+  </div>
+</footer>
 
 <div class="ctx-menu" id="ctx-menu">
   <div onclick="ctxCopy()">Copy</div>
@@ -1444,6 +1521,15 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 // =========================================================================
 // Block Type Registry
 // =========================================================================
+
+const CAT_STYLES = {
+  CNC:     { block: 'block-blue',   title: 'title-blue',   pal: 'pal-blue' },
+  Arduino: { block: 'block-green',  title: 'title-green',  pal: 'pal-green' },
+  Control: { block: 'block-amber',  title: 'title-amber',  pal: 'pal-amber' },
+  Macros:  { block: 'block-purple', title: 'title-purple',  pal: 'pal-purple' },
+};
+
+const CLOSE_SVG = '<svg fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M18 6L6 18"/><path d="M6 6l12 12"/></svg>';
 
 async function waitForCncIdle(timeoutSec) {
   const deadline = Date.now() + timeoutSec * 1000;
@@ -1644,6 +1730,7 @@ function buildPalette() {
     cats[bt.category].push({ key, ...bt });
   }
   for (const [cat, items] of Object.entries(cats)) {
+    const cs = CAT_STYLES[cat] || CAT_STYLES.CNC;
     const sec = document.createElement('div');
     sec.className = 'palette-category';
     sec.innerHTML = '<h3>' + cat + '</h3>';
@@ -1652,8 +1739,7 @@ function buildPalette() {
     list.dataset.category = cat;
     for (const item of items) {
       const el = document.createElement('div');
-      el.className = 'palette-block';
-      el.style.borderTopColor = item.color;
+      el.className = 'palette-block ' + cs.pal;
       el.textContent = item.name;
       el.dataset.blockType = item.key;
       list.appendChild(el);
@@ -1684,22 +1770,22 @@ function makeBlockFromType(typeKey) {
 function renderBlock(b, idx) {
   const bt = BLOCK_TYPES[b.type];
   if (!bt) return null;
+  const cs = CAT_STYLES[bt.category] || CAT_STYLES.CNC;
   const el = document.createElement('div');
-  el.className = 'block';
+  el.className = 'block ' + cs.block;
   el.dataset.id = b.id;
-  el.style.borderTopColor = bt.color;
   if (selectedIds.has(b.id)) el.classList.add('selected');
 
   // Header
   const hdr = document.createElement('div');
   hdr.className = 'block-header';
-  hdr.style.background = bt.color + '22';
-  hdr.innerHTML = '<span class="grip">&#9776;</span>' +
-    '<span class="block-title">' + bt.name + '</span>' +
-    '<span class="block-num">#' + (idx + 1) + '</span>';
+  const titleSpan = document.createElement('div');
+  titleSpan.className = 'block-title ' + cs.title;
+  titleSpan.innerHTML = bt.name;
+  hdr.appendChild(titleSpan);
   const btnDel = document.createElement('button');
   btnDel.className = 'btn-del';
-  btnDel.innerHTML = '&times;';
+  btnDel.innerHTML = CLOSE_SVG;
   btnDel.onclick = (e) => { e.stopPropagation(); deleteBlock(b.id); };
   hdr.appendChild(btnDel);
   el.appendChild(hdr);
@@ -1710,12 +1796,12 @@ function renderBlock(b, idx) {
     body.className = 'block-body';
     for (const p of bt.params) {
       const lbl = document.createElement('label');
-      lbl.textContent = p.label + ' ';
+      lbl.textContent = p.label + ': ';
       let inp;
       if (p.type === 'point-select') {
         inp = document.createElement('select');
         const none = document.createElement('option');
-        none.value = ''; none.textContent = '-- manual --';
+        none.value = ''; none.textContent = 'manual';
         inp.appendChild(none);
         cachedPoints.forEach((pt, i) => {
           const opt = document.createElement('option');
@@ -1724,7 +1810,7 @@ function renderBlock(b, idx) {
           if (b.params.point !== undefined && +b.params.point === i) opt.selected = true;
           inp.appendChild(opt);
         });
-        inp.style.width = 'auto'; inp.style.minWidth = '140px';
+        inp.style.minWidth = '120px';
         inp.dataset.paramKey = 'point';
         inp.dataset.blockId = b.id;
         inp.addEventListener('change', (e) => {
@@ -1886,7 +1972,6 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
     if (clipboard.length > 0) {
       const newBlocks = clipboard.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
-      // Insert after last selected or at end
       let insertIdx = blocks.length;
       if (selectedIds.size > 0) {
         const lastSelId = [...selectedIds].pop();
@@ -1989,7 +2074,7 @@ async function runSequence() {
   setRunStatus('Running...');
 
   // Clear previous states
-  document.querySelectorAll('.canvas .block').forEach(el => {
+  document.querySelectorAll('#canvas-inner .block').forEach(el => {
     el.classList.remove('done', 'error', 'running');
   });
 
@@ -1999,7 +2084,6 @@ async function runSequence() {
     const bt = BLOCK_TYPES[b.type];
     if (!bt) continue;
 
-    // Highlight running
     const el = document.querySelector(`.block[data-id="${b.id}"]`);
     if (el) { el.classList.add('running'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
     setRunStatus(`Running block ${i + 1}/${blocks.length}: ${bt.name}`);
@@ -2015,7 +2099,7 @@ async function runSequence() {
   }
 
   if (stopFlag) setRunStatus('Stopped');
-  else if (!document.querySelector('.canvas .block.error')) setRunStatus('Complete');
+  else if (!document.querySelector('#canvas-inner .block.error')) setRunStatus('Complete');
   running = false;
   document.getElementById('btn-play').disabled = false;
   document.getElementById('btn-stop').disabled = true;
@@ -2023,7 +2107,6 @@ async function runSequence() {
 
 async function stopSequence() {
   stopFlag = true;
-  // Also cancel any CNC jog in progress
   try { await fetch('/cnc/jog/cancel', { method: 'POST' }); } catch (e) {}
   setRunStatus('Stopping...');
 }
@@ -2046,13 +2129,12 @@ async function loadMacros() {
   } catch (e) {
     loadedMacros = [];
   }
-  // Update macro block type options
   BLOCK_TYPES['macro'].params[0].options = macroNames();
   if (loadedMacros.length > 0 && !BLOCK_TYPES['macro'].params[0].default) {
     BLOCK_TYPES['macro'].params[0].default = loadedMacros[0].name;
   }
   buildPalette();
-  renderAllBlocks(); // re-render to update any macro select dropdowns
+  renderAllBlocks();
 }
 
 // =========================================================================
@@ -2071,7 +2153,6 @@ function autoLoad() {
     if (saved) {
       blocks = JSON.parse(saved);
       nextId = parseInt(localStorage.getItem('sequencer_nextId') || '1', 10);
-      // Ensure nextId is higher than any existing block id
       for (const b of blocks) { if (b.id >= nextId) nextId = b.id + 1; }
     }
   } catch (e) {}
@@ -2167,9 +2248,10 @@ async function pollStatus() {
     const ard = await ardR.json();
     const wp = cnc.wpos || {};
     const ap = ard.positions || {};
-    document.getElementById('status-info').textContent =
-      `CNC: X=${(wp.x||0).toFixed(1)} Y=${(wp.y||0).toFixed(1)} A=${(wp.z||0).toFixed(1)} [${cnc.state||'?'}]` +
-      ` | Arduino: X=${ap.x||0} Z=${ap.z||0}`;
+    document.getElementById('status-info').innerHTML =
+      `<span>CNC:</span><span class="val"> X=${(wp.x||0).toFixed(1)} Y=${(wp.y||0).toFixed(1)} A=${(wp.z||0).toFixed(1)}</span>` +
+      `<span class="state"> [${cnc.state||'?'}]</span>` +
+      `&nbsp;&nbsp;&nbsp;<span>Arduino:</span><span class="val"> X=${ap.x||0} Z=${ap.z||0}</span>`;
   } catch (e) {}
 }
 
@@ -2186,9 +2268,8 @@ function applyTransform() {
   const inner = document.getElementById('canvas-inner');
   const cvs = document.getElementById('canvas');
   inner.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
-  // Move the dot grid with the pan
   cvs.style.backgroundPosition = `${panX}px ${panY}px`;
-  cvs.style.backgroundSize = `${24 * zoom}px ${24 * zoom}px`;
+  cvs.style.backgroundSize = `${20 * zoom}px ${20 * zoom}px`;
   document.getElementById('zoom-badge').textContent = Math.round(zoom * 100) + '%';
 }
 
@@ -2210,29 +2291,22 @@ function zoomBy(delta) {
 (function initPanZoom() {
   const cvs = document.getElementById('canvas');
 
-  // Zoom with mouse wheel
   cvs.addEventListener('wheel', (e) => {
     e.preventDefault();
     const rect = cvs.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    // Point under mouse in canvas-inner coordinates before zoom
     const bx = (mx - panX) / zoom;
     const by = (my - panY) / zoom;
-    const oldZoom = zoom;
     if (e.deltaY < 0) zoom = Math.min(ZOOM_MAX, zoom + ZOOM_STEP);
     else zoom = Math.max(ZOOM_MIN, zoom - ZOOM_STEP);
-    // Adjust pan so the point under mouse stays fixed
     panX = mx - bx * zoom;
     panY = my - by * zoom;
     applyTransform();
   }, { passive: false });
 
-  // Pan with middle mouse button or left-click on canvas background
   cvs.addEventListener('mousedown', (e) => {
-    // Middle button always pans
     const isMiddle = e.button === 1;
-    // Left button pans only if clicking on canvas or canvas-inner background
     const isLeftOnBg = e.button === 0 && (e.target.id === 'canvas' || e.target.id === 'canvas-inner');
     if (!isMiddle && !isLeftOnBg) return;
     e.preventDefault();
@@ -2249,10 +2323,10 @@ function zoomBy(delta) {
     applyTransform();
   });
 
-  window.addEventListener('mouseup', (e) => {
+  window.addEventListener('mouseup', () => {
     if (!isPanning) return;
     isPanning = false;
-    cvs.classList.remove('panning');
+    document.getElementById('canvas').classList.remove('panning');
   });
 })();
 
@@ -2260,7 +2334,7 @@ function zoomBy(delta) {
 // Init
 // =========================================================================
 autoLoad();
-loadPoints().then(() => loadMacros());   // loadMacros also calls buildPalette + renderAllBlocks
+loadPoints().then(() => loadMacros());
 initCanvasSortable();
 pollStatus();
 applyTransform();
