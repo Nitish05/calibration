@@ -1291,7 +1291,8 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Fira Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-         background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+         background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column;
+         height: 100vh; height: 100dvh; overflow: hidden; }
 
   h1 { padding: 10px 20px; background: #16213e; font-size: 1.2rem; display: flex; align-items: center; gap: 16px; }
   h1 .status-info { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #8ab4f8; }
@@ -1314,8 +1315,10 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   .palette-block.sortable-ghost { opacity: 0.4; }
 
   /* Canvas */
-  .canvas { flex: 1; overflow-y: auto; padding: 16px; background: #1a1a2e; }
-  .canvas-empty { color: #555; text-align: center; margin-top: 80px; font-size: 0.95rem; }
+  .canvas-wrap { flex: 1; position: relative; overflow: hidden; }
+  .canvas { width: 100%; height: 100%; overflow-y: auto; padding: 16px; background: #1a1a2e; min-height: 60px; }
+  .canvas-empty { color: #555; text-align: center; padding-top: 80px; font-size: 0.95rem;
+                  position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
   .canvas .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
                    transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
   .canvas .block.selected { box-shadow: 0 0 0 2px #4caf50; }
@@ -1384,8 +1387,9 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 
 <div class="workspace">
   <div class="palette" id="palette"></div>
-  <div class="canvas" id="canvas">
+  <div class="canvas-wrap">
     <div class="canvas-empty" id="canvas-empty">Drag blocks from the palette to build a sequence</div>
+    <div class="canvas" id="canvas"></div>
   </div>
 </div>
 
@@ -1689,13 +1693,8 @@ function renderBlock(b, idx) {
 function renderAllBlocks() {
   const canvas = document.getElementById('canvas');
   const empty = document.getElementById('canvas-empty');
-  // Remove all block elements but keep the empty message
-  canvas.querySelectorAll('.block').forEach(el => el.remove());
-  if (blocks.length === 0) {
-    empty.style.display = '';
-    return;
-  }
-  empty.style.display = 'none';
+  canvas.innerHTML = '';
+  empty.style.display = blocks.length === 0 ? '' : 'none';
   blocks.forEach((b, i) => {
     const el = renderBlock(b, i);
     if (el) canvas.appendChild(el);
@@ -1711,27 +1710,22 @@ function initCanvasSortable() {
     group: { name: 'blocks', pull: false, put: true },
     animation: 150,
     handle: '.block-header',
-    filter: '.canvas-empty',
     onAdd: function(evt) {
-      // A block was dragged from palette
       const typeKey = evt.item.dataset.blockType;
       const newBlock = makeBlockFromType(typeKey);
-      if (!newBlock) { evt.item.remove(); return; }
-      // Insert at correct position
-      const newIdx = evt.newIndex;
-      blocks.splice(newIdx, 0, newBlock);
-      evt.item.remove(); // remove the cloned palette element
+      evt.item.remove();
+      if (!newBlock) return;
+      const idx = Math.min(evt.newIndex, blocks.length);
+      blocks.splice(idx, 0, newBlock);
       renderAllBlocks();
       autoSave();
     },
-    onEnd: function(evt) {
-      // Reorder within canvas
-      if (evt.from === evt.to && evt.oldIndex !== evt.newIndex) {
-        const item = blocks.splice(evt.oldIndex, 1)[0];
-        blocks.splice(evt.newIndex, 0, item);
-        renderAllBlocks();
-        autoSave();
-      }
+    onUpdate: function(evt) {
+      if (evt.oldIndex === evt.newIndex) return;
+      const item = blocks.splice(evt.oldIndex, 1)[0];
+      blocks.splice(evt.newIndex, 0, item);
+      renderAllBlocks();
+      autoSave();
     }
   });
 }
@@ -1806,7 +1800,7 @@ document.addEventListener('keydown', (e) => {
 
 // Click on canvas background to deselect
 document.getElementById('canvas').addEventListener('click', (e) => {
-  if (e.target.id === 'canvas' || e.target.id === 'canvas-empty') {
+  if (e.target.id === 'canvas') {
     selectedIds.clear();
     renderAllBlocks();
   }
