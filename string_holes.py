@@ -83,6 +83,12 @@ else:
 atexit.register(arduino.disconnect)
 
 # ---------------------------------------------------------------------------
+# Data directories
+# ---------------------------------------------------------------------------
+os.makedirs("data/sequences", exist_ok=True)
+os.makedirs("data/macros", exist_ok=True)
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 points = []  # [{"type": "inside"|"outside", "x": float, "y": float, "a": float, "timestamp": str}]
@@ -562,7 +568,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <span class="pos" id="arduino-pos">X:-- Z:-- B1:-- B2:--</span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
-  <a href="/navigator" style="margin-left:auto; color:#8ab4f8; text-decoration:none; font-weight:600;">Point Navigator &rarr;</a>
+  <a href="/sequencer" style="margin-left:auto; color:#ce93d8; text-decoration:none; font-weight:600;">Block Sequencer</a>
+  <a href="/navigator" style="color:#8ab4f8; text-decoration:none; font-weight:600;">Point Navigator &rarr;</a>
   <span id="tag-status"></span>
 </div>
 
@@ -1004,6 +1011,7 @@ NAVIGATOR_HTML = r"""<!DOCTYPE html>
 
 <div class="nav-bar">
   <a href="/">&larr; Back to Capture</a>
+  <a href="/sequencer">Block Sequencer</a>
   <button class="btn-cancel" id="btn-cancel" onclick="cancelMove()" disabled>Cancel Move</button>
   <span class="nav-status" id="nav-status"></span>
   <span class="feedrate-label">Feedrate:</span>
@@ -1201,6 +1209,871 @@ document.addEventListener('keydown', (e) => {
 
 // Initial load
 refreshPoints();
+</script>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Sequencer routes
+# ---------------------------------------------------------------------------
+@app.route("/sequencer")
+def sequencer():
+    return SEQUENCER_HTML
+
+
+@app.route("/sequencer/save", methods=["POST"])
+def sequencer_save():
+    body = request.get_json(force=True)
+    name = body.get("name", "").strip()
+    blocks = body.get("blocks", [])
+    if not name:
+        return jsonify({"error": "Name required"}), 400
+    safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+    path = os.path.join("data/sequences", safe + ".json")
+    with open(path, "w") as f:
+        json.dump({"name": name, "blocks": blocks}, f, indent=2)
+    return jsonify({"ok": True})
+
+
+@app.route("/sequencer/list")
+def sequencer_list():
+    names = []
+    for fname in sorted(os.listdir("data/sequences")):
+        if fname.endswith(".json"):
+            names.append(fname[:-5])
+    return jsonify(names)
+
+
+@app.route("/sequencer/load")
+def sequencer_load():
+    name = request.args.get("name", "").strip()
+    safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+    path = os.path.join("data/sequences", safe + ".json")
+    if not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+
+@app.route("/sequencer/macros/save", methods=["POST"])
+def sequencer_macro_save():
+    body = request.get_json(force=True)
+    name = body.get("name", "").strip()
+    blocks = body.get("blocks", [])
+    if not name:
+        return jsonify({"error": "Name required"}), 400
+    safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+    path = os.path.join("data/macros", safe + ".json")
+    with open(path, "w") as f:
+        json.dump({"name": name, "blocks": blocks}, f, indent=2)
+    return jsonify({"ok": True})
+
+
+@app.route("/sequencer/macros")
+def sequencer_macros():
+    macros = []
+    for fname in sorted(os.listdir("data/macros")):
+        if fname.endswith(".json"):
+            with open(os.path.join("data/macros", fname)) as f:
+                macros.append(json.load(f))
+    return jsonify(macros)
+
+
+# ---------------------------------------------------------------------------
+# Sequencer HTML
+# ---------------------------------------------------------------------------
+SEQUENCER_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Block Sequencer</title>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Fira Sans', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #1a1a2e; color: #e0e0e0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  h1 { padding: 10px 20px; background: #16213e; font-size: 1.2rem; display: flex; align-items: center; gap: 16px; }
+  h1 .status-info { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #8ab4f8; }
+  h1 .nav-links { margin-left: auto; display: flex; gap: 12px; }
+  h1 .nav-links a { color: #8ab4f8; text-decoration: none; font-size: 0.85rem; font-weight: 600; }
+  h1 .nav-links a:hover { text-decoration: underline; }
+
+  .workspace { display: flex; flex: 1; overflow: hidden; }
+
+  /* Palette sidebar */
+  .palette { width: 220px; min-width: 220px; background: #0f3460; overflow-y: auto;
+             padding: 10px; border-right: 1px solid #333; }
+  .palette-category { margin-bottom: 14px; }
+  .palette-category h3 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 1px;
+                          color: #888; margin-bottom: 6px; padding: 0 4px; }
+  .palette-block { background: #16213e; border-radius: 6px; padding: 8px 10px; margin-bottom: 5px;
+                   cursor: grab; font-size: 0.8rem; font-weight: 600; border-top: 3px solid;
+                   opacity: 0.85; transition: opacity 0.15s; user-select: none; }
+  .palette-block:hover { opacity: 1; }
+  .palette-block.sortable-ghost { opacity: 0.4; }
+
+  /* Canvas */
+  .canvas { flex: 1; overflow-y: auto; padding: 16px; background: #1a1a2e; }
+  .canvas-empty { color: #555; text-align: center; margin-top: 80px; font-size: 0.95rem; }
+  .canvas .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
+                   transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
+  .canvas .block.selected { box-shadow: 0 0 0 2px #4caf50; }
+  .canvas .block.running { box-shadow: 0 0 0 2px #ff9800; animation: pulse 1s infinite; }
+  .canvas .block.error { box-shadow: 0 0 0 2px #f44336; }
+  .canvas .block.done { opacity: 0.5; }
+  .canvas .block .block-header { padding: 8px 12px; font-size: 0.8rem; font-weight: 700;
+                                  cursor: grab; display: flex; align-items: center; gap: 8px;
+                                  user-select: none; border-radius: 4px 4px 0 0; }
+  .canvas .block .block-header .grip { color: #666; font-size: 0.7rem; }
+  .canvas .block .block-header .block-title { flex: 1; }
+  .canvas .block .block-header .block-num { color: #666; font-size: 0.7rem; }
+  .canvas .block .block-header .btn-del { background: none; border: none; color: #f44336;
+                                           cursor: pointer; font-size: 1rem; padding: 0 4px;
+                                           opacity: 0.5; }
+  .canvas .block .block-header .btn-del:hover { opacity: 1; }
+  .canvas .block .block-body { padding: 6px 12px 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .canvas .block .block-body label { font-size: 0.75rem; color: #aaa; display: flex;
+                                      align-items: center; gap: 4px; }
+  .canvas .block .block-body input,
+  .canvas .block .block-body select { background: #0d1b3e; border: 1px solid #333; border-radius: 4px;
+                                       color: #e0e0e0; padding: 4px 6px; font-size: 0.8rem;
+                                       font-family: 'Fira Code', monospace; width: 80px; }
+  .canvas .block .block-body select { width: auto; min-width: 80px; }
+  .canvas .block.sortable-ghost { opacity: 0.3; }
+
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 2px #ff9800; }
+    50% { box-shadow: 0 0 12px 2px #ff9800; }
+  }
+
+  /* Context menu */
+  .ctx-menu { position: fixed; background: #16213e; border: 1px solid #444; border-radius: 6px;
+              padding: 4px 0; z-index: 1000; display: none; min-width: 160px;
+              box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
+  .ctx-menu div { padding: 7px 16px; font-size: 0.82rem; cursor: pointer; }
+  .ctx-menu div:hover { background: #0f3460; }
+  .ctx-menu .sep { height: 1px; background: #333; margin: 4px 0; padding: 0; cursor: default; }
+  .ctx-menu .sep:hover { background: #333; }
+
+  /* Toolbar */
+  .toolbar { display: flex; gap: 8px; padding: 10px 16px; background: #16213e;
+             border-top: 1px solid #333; align-items: center; flex-wrap: wrap; }
+  .toolbar button { padding: 7px 16px; border: none; border-radius: 6px; font-weight: 600;
+                    font-size: 0.82rem; cursor: pointer; transition: opacity 0.15s; }
+  .toolbar button:hover { opacity: 0.85; }
+  .btn-play { background: #4caf50; color: #fff; }
+  .btn-stop { background: #f44336; color: #fff; }
+  .btn-save { background: #1565C0; color: #fff; }
+  .btn-load { background: #0f3460; color: #e0e0e0; border: 1px solid #444 !important; }
+  .btn-export { background: #6A1B9A; color: #fff; }
+  .btn-import { background: #0f3460; color: #e0e0e0; border: 1px solid #444 !important; }
+  .toolbar .spacer { flex: 1; }
+  .toolbar .run-status { font-family: 'Fira Code', monospace; font-size: 0.8rem; color: #aaa; }
+</style>
+</head><body>
+
+<h1>
+  Block Sequencer
+  <span class="status-info" id="status-info">CNC: -- | Arduino: --</span>
+  <span class="nav-links">
+    <a href="/">&larr; Capture</a>
+    <a href="/navigator">Navigator</a>
+  </span>
+</h1>
+
+<div class="workspace">
+  <div class="palette" id="palette"></div>
+  <div class="canvas" id="canvas">
+    <div class="canvas-empty" id="canvas-empty">Drag blocks from the palette to build a sequence</div>
+  </div>
+</div>
+
+<div class="toolbar">
+  <button class="btn-play" id="btn-play" onclick="runSequence()">&#9654; Play</button>
+  <button class="btn-stop" id="btn-stop" onclick="stopSequence()" disabled>&#9632; Stop</button>
+  <span class="spacer"></span>
+  <span class="run-status" id="run-status"></span>
+  <span class="spacer"></span>
+  <button class="btn-save" onclick="saveSequence()">Save</button>
+  <button class="btn-load" onclick="showLoadDialog()">Load</button>
+  <button class="btn-export" onclick="exportSequence()">Export</button>
+  <button class="btn-import" onclick="importSequence()">Import</button>
+</div>
+
+<div class="ctx-menu" id="ctx-menu">
+  <div onclick="ctxCopy()">Copy</div>
+  <div onclick="ctxPaste()">Paste</div>
+  <div class="sep"></div>
+  <div onclick="ctxDuplicate()">Duplicate</div>
+  <div onclick="ctxDelete()">Delete</div>
+  <div class="sep"></div>
+  <div onclick="ctxSaveAsMacro()">Save as Macro</div>
+</div>
+
+<input type="file" id="file-import" accept=".json" style="display:none" onchange="handleImport(event)">
+
+<script>
+// =========================================================================
+// Block Type Registry
+// =========================================================================
+const BLOCK_TYPES = {
+  'cnc-goto': {
+    name: 'CNC Go To', category: 'CNC', color: '#1565C0',
+    params: [
+      { key: 'x', label: 'X', type: 'number', default: 0, step: 0.1 },
+      { key: 'y', label: 'Y', type: 'number', default: 0, step: 0.1 },
+      { key: 'a', label: 'A', type: 'number', default: 0, step: 0.1 },
+      { key: 'feedrate', label: 'Feed', type: 'number', default: 1000, step: 100 }
+    ],
+    execute: async (p) => {
+      const r = await fetch('/cnc/jog', { method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ x: +p.x, y: +p.y, a: +p.a, feedrate: +p.feedrate })
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+    }
+  },
+  'cnc-cancel': {
+    name: 'CNC Cancel', category: 'CNC', color: '#1565C0', params: [],
+    execute: async () => {
+      await fetch('/cnc/jog/cancel', { method: 'POST' });
+    }
+  },
+  'arduino-move': {
+    name: 'Arduino Move', category: 'Arduino', color: '#2E7D32',
+    params: [
+      { key: 'motor', label: 'Motor', type: 'select', options: ['x','z','byj1','byj2'], default: 'z' },
+      { key: 'steps', label: 'Steps', type: 'number', default: 100, step: 1 }
+    ],
+    execute: async (p) => {
+      const r = await fetch('/arduino/move', { method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ motor: p.motor, steps: +p.steps })
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+    }
+  },
+  'arduino-servo': {
+    name: 'Arduino Servo', category: 'Arduino', color: '#2E7D32',
+    params: [
+      { key: 'angle', label: 'Angle', type: 'number', default: 90, min: 0, max: 180, step: 1 }
+    ],
+    execute: async (p) => {
+      const r = await fetch('/arduino/servo', { method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ angle: +p.angle })
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+    }
+  },
+  'arduino-dc': {
+    name: 'Arduino DC', category: 'Arduino', color: '#2E7D32',
+    params: [
+      { key: 'action', label: 'Action', type: 'select', options: ['forward','reverse','stop'], default: 'forward' },
+      { key: 'speed', label: 'Speed', type: 'number', default: 50, min: 0, max: 255, step: 1 }
+    ],
+    execute: async (p) => {
+      const r = await fetch('/arduino/dc', { method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ action: p.action, speed: +p.speed })
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+    }
+  },
+  'arduino-reset': {
+    name: 'Arduino Reset', category: 'Arduino', color: '#2E7D32',
+    params: [
+      { key: 'mode', label: 'Mode', type: 'select', options: ['all','steppers'], default: 'all' }
+    ],
+    execute: async (p) => {
+      const r = await fetch('/arduino/reset', { method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ mode: p.mode })
+      });
+      const d = await r.json();
+      if (d.error) throw new Error(d.error);
+    }
+  },
+  'wait': {
+    name: 'Wait', category: 'Control', color: '#E65100',
+    params: [
+      { key: 'seconds', label: 'Seconds', type: 'number', default: 1, step: 0.1, min: 0 }
+    ],
+    execute: async (p) => {
+      await new Promise(r => setTimeout(r, (+p.seconds) * 1000));
+    }
+  },
+  'wait-idle': {
+    name: 'Wait for Idle', category: 'Control', color: '#E65100',
+    params: [
+      { key: 'timeout', label: 'Timeout (s)', type: 'number', default: 30, step: 1, min: 1 }
+    ],
+    execute: async (p) => {
+      const deadline = Date.now() + (+p.timeout) * 1000;
+      while (Date.now() < deadline) {
+        if (stopFlag) return;
+        const r = await fetch('/cnc/status');
+        const d = await r.json();
+        if (d.state === 'Idle') return;
+        await new Promise(r => setTimeout(r, 250));
+      }
+      throw new Error('Timeout waiting for idle');
+    }
+  },
+  'macro': {
+    name: 'Macro', category: 'Macros', color: '#6A1B9A',
+    params: [
+      { key: 'name', label: 'Macro', type: 'select', options: [], default: '' }
+    ],
+    execute: async (p, depth) => {
+      if (depth > 10) throw new Error('Macro recursion limit (10)');
+      const macro = loadedMacros.find(m => m.name === p.name);
+      if (!macro) throw new Error('Macro not found: ' + p.name);
+      for (const b of macro.blocks) {
+        if (stopFlag) return;
+        const bt = BLOCK_TYPES[b.type];
+        if (bt) await bt.execute(b.params, (depth || 0) + 1);
+      }
+    }
+  }
+};
+
+// =========================================================================
+// State
+// =========================================================================
+let blocks = [];        // [{id, type, params:{}}]
+let nextId = 1;
+let selectedIds = new Set();
+let clipboard = [];
+let stopFlag = false;
+let running = false;
+let loadedMacros = [];
+
+// =========================================================================
+// Palette rendering
+// =========================================================================
+function buildPalette() {
+  const pal = document.getElementById('palette');
+  pal.innerHTML = '';
+  const cats = {};
+  for (const [key, bt] of Object.entries(BLOCK_TYPES)) {
+    if (!cats[bt.category]) cats[bt.category] = [];
+    cats[bt.category].push({ key, ...bt });
+  }
+  for (const [cat, items] of Object.entries(cats)) {
+    const sec = document.createElement('div');
+    sec.className = 'palette-category';
+    sec.innerHTML = '<h3>' + cat + '</h3>';
+    const list = document.createElement('div');
+    list.className = 'palette-list';
+    list.dataset.category = cat;
+    for (const item of items) {
+      const el = document.createElement('div');
+      el.className = 'palette-block';
+      el.style.borderTopColor = item.color;
+      el.textContent = item.name;
+      el.dataset.blockType = item.key;
+      list.appendChild(el);
+    }
+    sec.appendChild(list);
+    pal.appendChild(sec);
+    new Sortable(list, {
+      group: { name: 'blocks', pull: 'clone', put: false },
+      sort: false,
+      animation: 150,
+    });
+  }
+}
+
+// =========================================================================
+// Canvas rendering
+// =========================================================================
+function createBlockId() { return nextId++; }
+
+function makeBlockFromType(typeKey) {
+  const bt = BLOCK_TYPES[typeKey];
+  if (!bt) return null;
+  const params = {};
+  for (const p of bt.params) params[p.key] = p.default;
+  return { id: createBlockId(), type: typeKey, params };
+}
+
+function renderBlock(b, idx) {
+  const bt = BLOCK_TYPES[b.type];
+  if (!bt) return null;
+  const el = document.createElement('div');
+  el.className = 'block';
+  el.dataset.id = b.id;
+  el.style.borderTopColor = bt.color;
+  if (selectedIds.has(b.id)) el.classList.add('selected');
+
+  // Header
+  const hdr = document.createElement('div');
+  hdr.className = 'block-header';
+  hdr.style.background = bt.color + '22';
+  hdr.innerHTML = '<span class="grip">&#9776;</span>' +
+    '<span class="block-title">' + bt.name + '</span>' +
+    '<span class="block-num">#' + (idx + 1) + '</span>';
+  const btnDel = document.createElement('button');
+  btnDel.className = 'btn-del';
+  btnDel.innerHTML = '&times;';
+  btnDel.onclick = (e) => { e.stopPropagation(); deleteBlock(b.id); };
+  hdr.appendChild(btnDel);
+  el.appendChild(hdr);
+
+  // Body with params
+  if (bt.params.length > 0) {
+    const body = document.createElement('div');
+    body.className = 'block-body';
+    for (const p of bt.params) {
+      const lbl = document.createElement('label');
+      lbl.textContent = p.label + ' ';
+      let inp;
+      if (p.type === 'select') {
+        inp = document.createElement('select');
+        const opts = p.key === 'name' && b.type === 'macro' ? macroNames() : p.options;
+        for (const o of opts) {
+          const opt = document.createElement('option');
+          opt.value = o; opt.textContent = o;
+          if (b.params[p.key] === o) opt.selected = true;
+          inp.appendChild(opt);
+        }
+      } else {
+        inp = document.createElement('input');
+        inp.type = 'number';
+        inp.value = b.params[p.key];
+        if (p.step != null) inp.step = p.step;
+        if (p.min != null) inp.min = p.min;
+        if (p.max != null) inp.max = p.max;
+      }
+      inp.dataset.paramKey = p.key;
+      inp.dataset.blockId = b.id;
+      inp.addEventListener('change', (e) => {
+        const block = blocks.find(x => x.id == e.target.dataset.blockId);
+        if (block) {
+          block.params[e.target.dataset.paramKey] = e.target.value;
+          autoSave();
+        }
+      });
+      lbl.appendChild(inp);
+      body.appendChild(lbl);
+    }
+    el.appendChild(body);
+  }
+
+  // Click to select
+  el.addEventListener('click', (e) => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'BUTTON') return;
+    handleSelect(b.id, e);
+  });
+
+  // Right-click context menu
+  el.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (!selectedIds.has(b.id)) {
+      selectedIds.clear();
+      selectedIds.add(b.id);
+      renderAllBlocks();
+    }
+    showContextMenu(e.clientX, e.clientY);
+  });
+
+  return el;
+}
+
+function renderAllBlocks() {
+  const canvas = document.getElementById('canvas');
+  const empty = document.getElementById('canvas-empty');
+  // Remove all block elements but keep the empty message
+  canvas.querySelectorAll('.block').forEach(el => el.remove());
+  if (blocks.length === 0) {
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  blocks.forEach((b, i) => {
+    const el = renderBlock(b, i);
+    if (el) canvas.appendChild(el);
+  });
+}
+
+// =========================================================================
+// SortableJS on canvas
+// =========================================================================
+let canvasSortable;
+function initCanvasSortable() {
+  canvasSortable = new Sortable(document.getElementById('canvas'), {
+    group: { name: 'blocks', pull: false, put: true },
+    animation: 150,
+    handle: '.block-header',
+    filter: '.canvas-empty',
+    onAdd: function(evt) {
+      // A block was dragged from palette
+      const typeKey = evt.item.dataset.blockType;
+      const newBlock = makeBlockFromType(typeKey);
+      if (!newBlock) { evt.item.remove(); return; }
+      // Insert at correct position
+      const newIdx = evt.newIndex;
+      blocks.splice(newIdx, 0, newBlock);
+      evt.item.remove(); // remove the cloned palette element
+      renderAllBlocks();
+      autoSave();
+    },
+    onEnd: function(evt) {
+      // Reorder within canvas
+      if (evt.from === evt.to && evt.oldIndex !== evt.newIndex) {
+        const item = blocks.splice(evt.oldIndex, 1)[0];
+        blocks.splice(evt.newIndex, 0, item);
+        renderAllBlocks();
+        autoSave();
+      }
+    }
+  });
+}
+
+// =========================================================================
+// Selection
+// =========================================================================
+function handleSelect(id, e) {
+  if (e.ctrlKey || e.metaKey) {
+    if (selectedIds.has(id)) selectedIds.delete(id);
+    else selectedIds.add(id);
+  } else if (e.shiftKey && selectedIds.size > 0) {
+    const lastId = [...selectedIds].pop();
+    const lastIdx = blocks.findIndex(b => b.id === lastId);
+    const curIdx = blocks.findIndex(b => b.id === id);
+    const [from, to] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
+    for (let i = from; i <= to; i++) selectedIds.add(blocks[i].id);
+  } else {
+    selectedIds.clear();
+    selectedIds.add(id);
+  }
+  renderAllBlocks();
+}
+
+function deleteBlock(id) {
+  blocks = blocks.filter(b => b.id !== id);
+  selectedIds.delete(id);
+  renderAllBlocks();
+  autoSave();
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    if (selectedIds.size > 0) {
+      blocks = blocks.filter(b => !selectedIds.has(b.id));
+      selectedIds.clear();
+      renderAllBlocks();
+      autoSave();
+    }
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+    e.preventDefault();
+    selectedIds.clear();
+    blocks.forEach(b => selectedIds.add(b.id));
+    renderAllBlocks();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+    if (selectedIds.size > 0) {
+      clipboard = blocks.filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
+    }
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+    if (clipboard.length > 0) {
+      const newBlocks = clipboard.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
+      // Insert after last selected or at end
+      let insertIdx = blocks.length;
+      if (selectedIds.size > 0) {
+        const lastSelId = [...selectedIds].pop();
+        const lastSelIdx = blocks.findIndex(b => b.id === lastSelId);
+        if (lastSelIdx >= 0) insertIdx = lastSelIdx + 1;
+      }
+      blocks.splice(insertIdx, 0, ...newBlocks);
+      selectedIds.clear();
+      newBlocks.forEach(b => selectedIds.add(b.id));
+      renderAllBlocks();
+      autoSave();
+    }
+  }
+});
+
+// Click on canvas background to deselect
+document.getElementById('canvas').addEventListener('click', (e) => {
+  if (e.target.id === 'canvas' || e.target.id === 'canvas-empty') {
+    selectedIds.clear();
+    renderAllBlocks();
+  }
+});
+
+// =========================================================================
+// Context menu
+// =========================================================================
+function showContextMenu(x, y) {
+  const menu = document.getElementById('ctx-menu');
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  menu.style.display = 'block';
+}
+
+document.addEventListener('click', () => {
+  document.getElementById('ctx-menu').style.display = 'none';
+});
+
+function ctxCopy() {
+  clipboard = blocks.filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
+}
+
+function ctxPaste() {
+  if (clipboard.length === 0) return;
+  const newBlocks = clipboard.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
+  let insertIdx = blocks.length;
+  if (selectedIds.size > 0) {
+    const lastSelId = [...selectedIds].pop();
+    const lastSelIdx = blocks.findIndex(b => b.id === lastSelId);
+    if (lastSelIdx >= 0) insertIdx = lastSelIdx + 1;
+  }
+  blocks.splice(insertIdx, 0, ...newBlocks);
+  selectedIds.clear();
+  newBlocks.forEach(b => selectedIds.add(b.id));
+  renderAllBlocks();
+  autoSave();
+}
+
+function ctxDuplicate() {
+  const sel = blocks.filter(b => selectedIds.has(b.id));
+  if (sel.length === 0) return;
+  const dupes = sel.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
+  const lastIdx = blocks.findIndex(b => b.id === sel[sel.length - 1].id);
+  blocks.splice(lastIdx + 1, 0, ...dupes);
+  selectedIds.clear();
+  dupes.forEach(b => selectedIds.add(b.id));
+  renderAllBlocks();
+  autoSave();
+}
+
+function ctxDelete() {
+  blocks = blocks.filter(b => !selectedIds.has(b.id));
+  selectedIds.clear();
+  renderAllBlocks();
+  autoSave();
+}
+
+function ctxSaveAsMacro() {
+  const sel = blocks.filter(b => selectedIds.has(b.id));
+  if (sel.length === 0) return;
+  const name = prompt('Macro name:');
+  if (!name) return;
+  const macroBlocks = sel.map(b => ({ type: b.type, params: { ...b.params } }));
+  fetch('/sequencer/macros/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, blocks: macroBlocks })
+  }).then(() => loadMacros());
+}
+
+// =========================================================================
+// Execution engine
+// =========================================================================
+async function runSequence() {
+  if (running) return;
+  if (blocks.length === 0) return;
+  running = true;
+  stopFlag = false;
+  document.getElementById('btn-play').disabled = true;
+  document.getElementById('btn-stop').disabled = false;
+  setRunStatus('Running...');
+
+  // Clear previous states
+  document.querySelectorAll('.canvas .block').forEach(el => {
+    el.classList.remove('done', 'error', 'running');
+  });
+
+  for (let i = 0; i < blocks.length; i++) {
+    if (stopFlag) break;
+    const b = blocks[i];
+    const bt = BLOCK_TYPES[b.type];
+    if (!bt) continue;
+
+    // Highlight running
+    const el = document.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) { el.classList.add('running'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+    setRunStatus(`Running block ${i + 1}/${blocks.length}: ${bt.name}`);
+
+    try {
+      await bt.execute(b.params, 0);
+      if (el) { el.classList.remove('running'); el.classList.add('done'); }
+    } catch (err) {
+      if (el) { el.classList.remove('running'); el.classList.add('error'); }
+      setRunStatus(`Error at block ${i + 1}: ${err.message}`);
+      break;
+    }
+  }
+
+  if (stopFlag) setRunStatus('Stopped');
+  else if (!document.querySelector('.canvas .block.error')) setRunStatus('Complete');
+  running = false;
+  document.getElementById('btn-play').disabled = false;
+  document.getElementById('btn-stop').disabled = true;
+}
+
+async function stopSequence() {
+  stopFlag = true;
+  // Also cancel any CNC jog in progress
+  try { await fetch('/cnc/jog/cancel', { method: 'POST' }); } catch (e) {}
+  setRunStatus('Stopping...');
+}
+
+function setRunStatus(msg) {
+  document.getElementById('run-status').textContent = msg;
+}
+
+// =========================================================================
+// Macro system
+// =========================================================================
+function macroNames() {
+  return loadedMacros.map(m => m.name);
+}
+
+async function loadMacros() {
+  try {
+    const r = await fetch('/sequencer/macros');
+    loadedMacros = await r.json();
+  } catch (e) {
+    loadedMacros = [];
+  }
+  // Update macro block type options
+  BLOCK_TYPES['macro'].params[0].options = macroNames();
+  if (loadedMacros.length > 0 && !BLOCK_TYPES['macro'].params[0].default) {
+    BLOCK_TYPES['macro'].params[0].default = loadedMacros[0].name;
+  }
+  buildPalette();
+  renderAllBlocks(); // re-render to update any macro select dropdowns
+}
+
+// =========================================================================
+// Persistence — localStorage auto-save
+// =========================================================================
+function autoSave() {
+  try {
+    localStorage.setItem('sequencer_blocks', JSON.stringify(blocks));
+    localStorage.setItem('sequencer_nextId', nextId);
+  } catch (e) {}
+}
+
+function autoLoad() {
+  try {
+    const saved = localStorage.getItem('sequencer_blocks');
+    if (saved) {
+      blocks = JSON.parse(saved);
+      nextId = parseInt(localStorage.getItem('sequencer_nextId') || '1', 10);
+      // Ensure nextId is higher than any existing block id
+      for (const b of blocks) { if (b.id >= nextId) nextId = b.id + 1; }
+    }
+  } catch (e) {}
+}
+
+// Save/Load named sequences to server
+async function saveSequence() {
+  const name = prompt('Sequence name:');
+  if (!name) return;
+  const payload = blocks.map(b => ({ type: b.type, params: { ...b.params } }));
+  const r = await fetch('/sequencer/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, blocks: payload })
+  });
+  const d = await r.json();
+  if (d.error) alert('Error: ' + d.error);
+  else setRunStatus('Saved: ' + name);
+}
+
+async function showLoadDialog() {
+  const r = await fetch('/sequencer/list');
+  const names = await r.json();
+  if (names.length === 0) { alert('No saved sequences'); return; }
+  const name = prompt('Load sequence:\n\n' + names.join('\n') + '\n\nEnter name:');
+  if (!name) return;
+  const r2 = await fetch('/sequencer/load?name=' + encodeURIComponent(name));
+  const d = await r2.json();
+  if (d.error) { alert('Error: ' + d.error); return; }
+  blocks = d.blocks.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }));
+  selectedIds.clear();
+  renderAllBlocks();
+  autoSave();
+  setRunStatus('Loaded: ' + name);
+}
+
+// Export/Import JSON files
+function exportSequence() {
+  const payload = blocks.map(b => ({ type: b.type, params: { ...b.params } }));
+  const blob = new Blob([JSON.stringify({ blocks: payload }, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'sequence.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function importSequence() {
+  document.getElementById('file-import').click();
+}
+
+function handleImport(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (data.blocks && Array.isArray(data.blocks)) {
+        blocks = data.blocks.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }));
+        selectedIds.clear();
+        renderAllBlocks();
+        autoSave();
+        setRunStatus('Imported ' + blocks.length + ' blocks');
+      } else {
+        alert('Invalid sequence file');
+      }
+    } catch (err) {
+      alert('Error reading file: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+
+// =========================================================================
+// Status polling
+// =========================================================================
+async function pollStatus() {
+  try {
+    const [cncR, ardR] = await Promise.all([fetch('/cnc/status'), fetch('/arduino/status')]);
+    const cnc = await cncR.json();
+    const ard = await ardR.json();
+    const wp = cnc.wpos || {};
+    const ap = ard.positions || {};
+    document.getElementById('status-info').textContent =
+      `CNC: X=${(wp.x||0).toFixed(1)} Y=${(wp.y||0).toFixed(1)} A=${(wp.z||0).toFixed(1)} [${cnc.state||'?'}]` +
+      ` | Arduino: X=${ap.x||0} Z=${ap.z||0}`;
+  } catch (e) {}
+}
+
+setInterval(pollStatus, 1000);
+
+// =========================================================================
+// Init
+// =========================================================================
+autoLoad();
+loadMacros();   // also calls buildPalette + renderAllBlocks
+initCanvasSortable();
+pollStatus();
 </script>
 </body></html>"""
 
