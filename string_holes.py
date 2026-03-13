@@ -1317,34 +1317,43 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 
   /* Canvas */
   .canvas-wrap { flex: 1; position: relative; overflow: hidden; }
-  .canvas { width: 100%; height: 100%; overflow-y: auto; padding: 16px; background: #1a1a2e; min-height: 60px; }
+  .canvas { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; position: relative; cursor: grab;
+            background-image: radial-gradient(circle, #2a2a4e 1px, transparent 1px);
+            background-size: 24px 24px; }
+  .canvas.panning { cursor: grabbing; }
+  .canvas-inner { position: absolute; top: 0; left: 0; transform-origin: 0 0;
+                  min-width: 200px; padding: 16px; }
   .canvas-empty { color: #555; text-align: center; padding-top: 80px; font-size: 0.95rem;
-                  position: absolute; top: 0; left: 0; right: 0; pointer-events: none; }
-  .canvas .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
-                   transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
-  .canvas .block.selected { box-shadow: 0 0 0 2px #4caf50; }
-  .canvas .block.running { box-shadow: 0 0 0 2px #ff9800; animation: pulse 1s infinite; }
-  .canvas .block.error { box-shadow: 0 0 0 2px #f44336; }
-  .canvas .block.done { opacity: 0.5; }
-  .canvas .block .block-header { padding: 8px 12px; font-size: 0.8rem; font-weight: 700;
+                  position: absolute; top: 0; left: 0; right: 0; pointer-events: none; z-index: 1; }
+  .zoom-badge { position: absolute; bottom: 10px; right: 10px; background: #16213e; border: 1px solid #333;
+                border-radius: 4px; padding: 4px 10px; font-size: 0.72rem; color: #888; z-index: 2;
+                font-family: 'Fira Code', monospace; cursor: pointer; user-select: none; }
+  .zoom-badge:hover { color: #ccc; }
+  .canvas-inner .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
+                         transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
+  .canvas-inner .block.selected { box-shadow: 0 0 0 2px #4caf50; }
+  .canvas-inner .block.running { box-shadow: 0 0 0 2px #ff9800; animation: pulse 1s infinite; }
+  .canvas-inner .block.error { box-shadow: 0 0 0 2px #f44336; }
+  .canvas-inner .block.done { opacity: 0.5; }
+  .canvas-inner .block .block-header { padding: 8px 12px; font-size: 0.8rem; font-weight: 700;
                                   cursor: grab; display: flex; align-items: center; gap: 8px;
                                   user-select: none; border-radius: 4px 4px 0 0; }
-  .canvas .block .block-header .grip { color: #666; font-size: 0.7rem; }
-  .canvas .block .block-header .block-title { flex: 1; }
-  .canvas .block .block-header .block-num { color: #666; font-size: 0.7rem; }
-  .canvas .block .block-header .btn-del { background: none; border: none; color: #f44336;
+  .canvas-inner .block .block-header .grip { color: #666; font-size: 0.7rem; }
+  .canvas-inner .block .block-header .block-title { flex: 1; }
+  .canvas-inner .block .block-header .block-num { color: #666; font-size: 0.7rem; }
+  .canvas-inner .block .block-header .btn-del { background: none; border: none; color: #f44336;
                                            cursor: pointer; font-size: 1rem; padding: 0 4px;
                                            opacity: 0.5; }
-  .canvas .block .block-header .btn-del:hover { opacity: 1; }
-  .canvas .block .block-body { padding: 6px 12px 10px; display: flex; flex-wrap: wrap; gap: 8px; }
-  .canvas .block .block-body label { font-size: 0.75rem; color: #aaa; display: flex;
+  .canvas-inner .block .block-header .btn-del:hover { opacity: 1; }
+  .canvas-inner .block .block-body { padding: 6px 12px 10px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .canvas-inner .block .block-body label { font-size: 0.75rem; color: #aaa; display: flex;
                                       align-items: center; gap: 4px; }
-  .canvas .block .block-body input,
-  .canvas .block .block-body select { background: #0d1b3e; border: 1px solid #333; border-radius: 4px;
+  .canvas-inner .block .block-body input,
+  .canvas-inner .block .block-body select { background: #0d1b3e; border: 1px solid #333; border-radius: 4px;
                                        color: #e0e0e0; padding: 4px 6px; font-size: 0.8rem;
                                        font-family: 'Fira Code', monospace; width: 80px; }
-  .canvas .block .block-body select { width: auto; min-width: 80px; }
-  .canvas .block.sortable-ghost { opacity: 0.3; }
+  .canvas-inner .block .block-body select { width: auto; min-width: 80px; }
+  .canvas-inner .block.sortable-ghost { opacity: 0.3; }
 
   @keyframes pulse {
     0%, 100% { box-shadow: 0 0 0 2px #ff9800; }
@@ -1391,7 +1400,10 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   <div class="palette" id="palette"></div>
   <div class="canvas-wrap">
     <div class="canvas-empty" id="canvas-empty">Drag blocks from the palette to build a sequence</div>
-    <div class="canvas" id="canvas"></div>
+    <div class="canvas" id="canvas">
+      <div class="canvas-inner" id="canvas-inner"></div>
+    </div>
+    <div class="zoom-badge" id="zoom-badge" onclick="resetView()" title="Click to reset view">100%</div>
   </div>
 </div>
 
@@ -1774,13 +1786,13 @@ function renderBlock(b, idx) {
 }
 
 function renderAllBlocks() {
-  const canvas = document.getElementById('canvas');
+  const inner = document.getElementById('canvas-inner');
   const empty = document.getElementById('canvas-empty');
-  canvas.innerHTML = '';
+  inner.innerHTML = '';
   empty.style.display = blocks.length === 0 ? '' : 'none';
   blocks.forEach((b, i) => {
     const el = renderBlock(b, i);
-    if (el) canvas.appendChild(el);
+    if (el) inner.appendChild(el);
   });
 }
 
@@ -1789,7 +1801,7 @@ function renderAllBlocks() {
 // =========================================================================
 let canvasSortable;
 function initCanvasSortable() {
-  canvasSortable = new Sortable(document.getElementById('canvas'), {
+  canvasSortable = new Sortable(document.getElementById('canvas-inner'), {
     group: { name: 'blocks', pull: false, put: true },
     animation: 150,
     handle: '.block-header',
@@ -1883,7 +1895,7 @@ document.addEventListener('keydown', (e) => {
 
 // Click on canvas background to deselect
 document.getElementById('canvas').addEventListener('click', (e) => {
-  if (e.target.id === 'canvas') {
+  if (e.target.id === 'canvas' || e.target.id === 'canvas-inner') {
     selectedIds.clear();
     renderAllBlocks();
   }
@@ -2155,12 +2167,84 @@ async function pollStatus() {
 setInterval(pollStatus, 1000);
 
 // =========================================================================
+// Pan & Zoom
+// =========================================================================
+let panX = 0, panY = 0, zoom = 1;
+const ZOOM_MIN = 0.25, ZOOM_MAX = 3, ZOOM_STEP = 0.1;
+let isPanning = false, panStartX = 0, panStartY = 0, panStartPX = 0, panStartPY = 0;
+
+function applyTransform() {
+  const inner = document.getElementById('canvas-inner');
+  const cvs = document.getElementById('canvas');
+  inner.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
+  // Move the dot grid with the pan
+  cvs.style.backgroundPosition = `${panX}px ${panY}px`;
+  cvs.style.backgroundSize = `${24 * zoom}px ${24 * zoom}px`;
+  document.getElementById('zoom-badge').textContent = Math.round(zoom * 100) + '%';
+}
+
+function resetView() {
+  panX = 0; panY = 0; zoom = 1;
+  applyTransform();
+}
+
+(function initPanZoom() {
+  const cvs = document.getElementById('canvas');
+
+  // Zoom with mouse wheel
+  cvs.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const rect = cvs.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    // Point under mouse in canvas-inner coordinates before zoom
+    const bx = (mx - panX) / zoom;
+    const by = (my - panY) / zoom;
+    const oldZoom = zoom;
+    if (e.deltaY < 0) zoom = Math.min(ZOOM_MAX, zoom + ZOOM_STEP);
+    else zoom = Math.max(ZOOM_MIN, zoom - ZOOM_STEP);
+    // Adjust pan so the point under mouse stays fixed
+    panX = mx - bx * zoom;
+    panY = my - by * zoom;
+    applyTransform();
+  }, { passive: false });
+
+  // Pan with middle mouse button or left-click on canvas background
+  cvs.addEventListener('mousedown', (e) => {
+    // Middle button always pans
+    const isMiddle = e.button === 1;
+    // Left button pans only if clicking on canvas or canvas-inner background
+    const isLeftOnBg = e.button === 0 && (e.target.id === 'canvas' || e.target.id === 'canvas-inner');
+    if (!isMiddle && !isLeftOnBg) return;
+    e.preventDefault();
+    isPanning = true;
+    panStartX = e.clientX; panStartY = e.clientY;
+    panStartPX = panX; panStartPY = panY;
+    cvs.classList.add('panning');
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isPanning) return;
+    panX = panStartPX + (e.clientX - panStartX);
+    panY = panStartPY + (e.clientY - panStartY);
+    applyTransform();
+  });
+
+  window.addEventListener('mouseup', (e) => {
+    if (!isPanning) return;
+    isPanning = false;
+    cvs.classList.remove('panning');
+  });
+})();
+
+// =========================================================================
 // Init
 // =========================================================================
 autoLoad();
 loadPoints().then(() => loadMacros());   // loadMacros also calls buildPalette + renderAllBlocks
 initCanvasSortable();
 pollStatus();
+applyTransform();
 </script>
 </body></html>"""
 
