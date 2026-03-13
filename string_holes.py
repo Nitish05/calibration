@@ -1519,7 +1519,8 @@ const BLOCK_TYPES = {
     name: 'Arduino DC', category: 'Arduino', color: '#2E7D32',
     params: [
       { key: 'action', label: 'Action', type: 'select', options: ['forward','reverse','stop'], default: 'forward' },
-      { key: 'speed', label: 'Speed', type: 'number', default: 50, min: 0, max: 255, step: 1 }
+      { key: 'speed', label: 'Speed', type: 'number', default: 50, min: 0, max: 255, step: 1 },
+      { key: 'duration', label: 'Time (s)', type: 'number', default: 0, min: 0, step: 0.1 }
     ],
     execute: async (p) => {
       const r = await fetch('/arduino/dc', { method: 'POST',
@@ -1528,6 +1529,16 @@ const BLOCK_TYPES = {
       });
       const d = await r.json();
       if (d.error) throw new Error(d.error);
+      const dur = +p.duration;
+      if (dur > 0) {
+        await new Promise(r => setTimeout(r, dur * 1000));
+        if (!stopFlag) {
+          await fetch('/arduino/dc', { method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ action: 'stop' })
+          });
+        }
+      }
     }
   },
   'arduino-reset': {
