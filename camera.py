@@ -3,6 +3,8 @@ Camera abstraction that works on both desktop (OpenCV) and Raspberry Pi (picamer
 Set use_picamera=True to use picamera2 (for CSI cameras), otherwise uses OpenCV (for USB cameras).
 """
 
+import re
+
 import cv2
 
 
@@ -53,6 +55,11 @@ class Camera:
 
         if device is None:
             device = self.find_usb_camera() or 0
+        # OpenCV needs an integer index (not path string) for FOURCC/resolution
+        # changes to work via the V4L2 backend
+        if isinstance(device, str):
+            m = re.search(r"video(\d+)", device)
+            device = int(m.group(1)) if m else device
         self._cap = cv2.VideoCapture(device)
         # Set MJPEG format first — C920 only does 1080p via MJPEG, not YUYV
         self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
