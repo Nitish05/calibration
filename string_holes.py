@@ -1413,6 +1413,28 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
     background-position: right 4px center; background-repeat: no-repeat; background-size: 1.2em;
     padding-right: 22px; }
 
+  /* Macro preview dropdown */
+  .macro-preview-toggle { display: flex; align-items: center; gap: 4px; background: rgba(139,92,246,0.2);
+    border: 1px solid rgba(167,139,250,0.3); border-radius: 6px; color: #c4b5fd; font-size: 0.75rem;
+    font-weight: 500; padding: 4px 10px; cursor: pointer; transition: all 0.15s; margin-top: 8px; width: 100%; }
+  .macro-preview-toggle:hover { background: rgba(139,92,246,0.3); color: #e2e8f0; }
+  .macro-preview-toggle svg { width: 12px; height: 12px; transition: transform 0.2s; flex-shrink: 0; }
+  .macro-preview-toggle.open svg { transform: rotate(180deg); }
+  .macro-preview-list { margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.3); border-radius: 8px;
+    border: 1px solid rgba(167,139,250,0.15); display: none; }
+  .macro-preview-list.open { display: block; }
+  .macro-preview-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+    border-radius: 6px; margin-bottom: 4px; font-size: 0.75rem; font-weight: 500; }
+  .macro-preview-item:last-child { margin-bottom: 0; }
+  .macro-preview-item .mp-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .macro-preview-item .mp-idx { color: #64748b; font-family: 'Fira Code', monospace; min-width: 18px; }
+  .macro-preview-item .mp-name { color: #cbd5e1; }
+  .macro-preview-item .mp-params { color: #64748b; font-family: 'Fira Code', monospace; font-size: 0.7rem; }
+  .mp-dot-blue { background: #3b82f6; }
+  .mp-dot-green { background: #34d399; }
+  .mp-dot-amber { background: #f59e0b; }
+  .mp-dot-purple { background: #a78bfa; }
+
   @keyframes pulse {
     0%, 100% { filter: brightness(1); }
     50% { filter: brightness(1.3); }
@@ -1858,6 +1880,44 @@ function renderBlock(b, idx) {
       body.appendChild(lbl);
     }
     el.appendChild(body);
+  }
+
+  // Macro preview dropdown
+  if (b.type === 'macro' && b.params.name) {
+    const macro = loadedMacros.find(m => m.name === b.params.name);
+    if (macro && macro.blocks && macro.blocks.length > 0) {
+      const DOT_CLASSES = { CNC: 'mp-dot-blue', Arduino: 'mp-dot-green', Control: 'mp-dot-amber', Macros: 'mp-dot-purple' };
+      const toggleBtn = document.createElement('button');
+      toggleBtn.className = 'macro-preview-toggle';
+      toggleBtn.innerHTML = '<svg fill="currentColor" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg> ' +
+        macro.blocks.length + ' action' + (macro.blocks.length !== 1 ? 's' : '');
+      const list = document.createElement('div');
+      list.className = 'macro-preview-list';
+      macro.blocks.forEach((mb, i) => {
+        const mbt = BLOCK_TYPES[mb.type];
+        if (!mbt) return;
+        const cat = mbt.category || 'CNC';
+        const dotCls = DOT_CLASSES[cat] || 'mp-dot-blue';
+        const item = document.createElement('div');
+        item.className = 'macro-preview-item';
+        let paramStr = '';
+        for (const [k, v] of Object.entries(mb.params || {})) {
+          if (v !== '' && v != null) paramStr += k + '=' + v + ' ';
+        }
+        item.innerHTML = '<span class="mp-dot ' + dotCls + '"></span>' +
+          '<span class="mp-idx">' + (i + 1) + '</span>' +
+          '<span class="mp-name">' + mbt.name + '</span>' +
+          (paramStr ? '<span class="mp-params">' + paramStr.trim() + '</span>' : '');
+        list.appendChild(item);
+      });
+      toggleBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleBtn.classList.toggle('open');
+        list.classList.toggle('open');
+      });
+      el.appendChild(toggleBtn);
+      el.appendChild(list);
+    }
   }
 
   // Click to select
