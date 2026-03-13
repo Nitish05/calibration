@@ -1325,10 +1325,15 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
                   min-width: 200px; padding: 16px; }
   .canvas-empty { color: #555; text-align: center; padding-top: 80px; font-size: 0.95rem;
                   position: absolute; top: 0; left: 0; right: 0; pointer-events: none; z-index: 1; }
-  .zoom-badge { position: absolute; bottom: 10px; right: 10px; background: #16213e; border: 1px solid #333;
-                border-radius: 4px; padding: 4px 10px; font-size: 0.72rem; color: #888; z-index: 2;
-                font-family: 'Fira Code', monospace; cursor: pointer; user-select: none; }
-  .zoom-badge:hover { color: #ccc; }
+  .zoom-controls { position: absolute; bottom: 10px; right: 10px; display: flex; gap: 0;
+                   background: #16213e; border: 1px solid #333; border-radius: 6px; z-index: 2;
+                   font-family: 'Fira Code', monospace; user-select: none; overflow: hidden; }
+  .zoom-controls button, .zoom-controls span { background: none; border: none; color: #888;
+                   font-size: 0.78rem; padding: 5px 10px; cursor: pointer; }
+  .zoom-controls button:hover { background: #0f3460; color: #ccc; }
+  .zoom-controls span { cursor: pointer; min-width: 44px; text-align: center; border-left: 1px solid #333;
+                        border-right: 1px solid #333; }
+  .zoom-controls span:hover { color: #ccc; }
   .canvas-inner .block { background: #16213e; border-radius: 8px; margin-bottom: 8px; border-top: 4px solid;
                          transition: box-shadow 0.15s, opacity 0.15s; position: relative; }
   .canvas-inner .block.selected { box-shadow: 0 0 0 2px #4caf50; }
@@ -1403,7 +1408,11 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
     <div class="canvas" id="canvas">
       <div class="canvas-inner" id="canvas-inner"></div>
     </div>
-    <div class="zoom-badge" id="zoom-badge" onclick="resetView()" title="Click to reset view">100%</div>
+    <div class="zoom-controls">
+      <button onclick="zoomBy(-ZOOM_STEP)" title="Zoom out">&minus;</button>
+      <span id="zoom-badge" onclick="resetView()" title="Reset view">100%</span>
+      <button onclick="zoomBy(ZOOM_STEP)" title="Zoom in">&plus;</button>
+    </div>
   </div>
 </div>
 
@@ -2185,6 +2194,16 @@ function applyTransform() {
 
 function resetView() {
   panX = 0; panY = 0; zoom = 1;
+  applyTransform();
+}
+
+function zoomBy(delta) {
+  const cvs = document.getElementById('canvas');
+  const rect = cvs.getBoundingClientRect();
+  const cx = rect.width / 2, cy = rect.height / 2;
+  const bx = (cx - panX) / zoom, by = (cy - panY) / zoom;
+  zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom + delta));
+  panX = cx - bx * zoom; panY = cy - by * zoom;
   applyTransform();
 }
 
