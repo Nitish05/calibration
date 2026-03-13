@@ -54,10 +54,14 @@ class Camera:
         if device is None:
             device = self.find_usb_camera() or 0
         self._cap = cv2.VideoCapture(device)
+        # Set MJPEG format first — C920 only does 1080p via MJPEG, not YUYV
+        self._cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self._lock_controls()
-        print(f"Camera: OpenCV v4l2 device {device} ({width}x{height})")
+        print(f"Camera: OpenCV v4l2 device {device} ({actual_w}x{actual_h})")
 
     def _lock_controls(self):
         """Lock C920 controls for consistent imaging via OpenCV API."""
