@@ -21,11 +21,8 @@ class CNCController:
         except ImportError:
             return None
         for port in serial.tools.list_ports.comports():
-            if "CH340" in (port.description or "") or "CH340" in (port.manufacturer or ""):
-                print(f"[CNC] Auto-detected serial port: {port.device} ({port.description})")
-                return port.device
-        for port in serial.tools.list_ports.comports():
-            if "ttyUSB" in port.device or "ttyACM" in port.device:
+            vid = port.vid or 0
+            if vid == 0x1A86 or "CH340" in (port.description or "") or "CH340" in (port.manufacturer or ""):
                 print(f"[CNC] Auto-detected serial port: {port.device} ({port.description})")
                 return port.device
         return None
