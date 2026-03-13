@@ -7,7 +7,31 @@ import cv2
 
 
 class Camera:
-    def __init__(self, width=1920, height=1080, device=0, use_picamera=False):
+    @staticmethod
+    def find_usb_camera():
+        """Find the first USB camera (e.g. C920) by scanning v4l2 devices."""
+        import os
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["v4l2-ctl", "--list-devices"],
+                capture_output=True, text=True, timeout=5,
+            )
+            lines = result.stdout.splitlines()
+            for i, line in enumerate(lines):
+                if "usb" in line.lower():
+                    # Next indented lines are device paths
+                    for j in range(i + 1, len(lines)):
+                        dev = lines[j].strip()
+                        if not dev or not dev.startswith("/dev/video"):
+                            break
+                        # Return the first video device for this USB camera
+                        return dev
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return None
+
+    def __init__(self, width=1920, height=1080, device=None, use_picamera=False):
         self.width = width
         self.height = height
         self._picam2 = None
@@ -27,6 +51,8 @@ class Camera:
             except (ImportError, RuntimeError) as e:
                 print(f"picamera2 failed ({e}), falling back to OpenCV")
 
+        if device is None:
+            device = self.find_usb_camera() or 0
         self._cap = cv2.VideoCapture(device)
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
