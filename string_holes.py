@@ -1426,7 +1426,6 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 
 async function waitForCncIdle(timeoutSec) {
   const deadline = Date.now() + timeoutSec * 1000;
-  // Small initial delay to let GRBL transition out of Idle into Jog/Run
   await new Promise(r => setTimeout(r, 300));
   while (Date.now() < deadline) {
     if (stopFlag) return;
@@ -1436,6 +1435,28 @@ async function waitForCncIdle(timeoutSec) {
     await new Promise(r => setTimeout(r, 200));
   }
   throw new Error('Timeout waiting for CNC idle');
+}
+
+async function waitForArduinoMotorStop(motor, timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000;
+  await new Promise(r => setTimeout(r, 400));
+  let lastPos = null;
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    if (stopFlag) return;
+    const r = await fetch('/arduino/status');
+    const d = await r.json();
+    const pos = d.positions ? d.positions[motor] : null;
+    if (pos !== null && pos === lastPos) {
+      stableCount++;
+      if (stableCount >= 3) return;
+    } else {
+      stableCount = 0;
+    }
+    lastPos = pos;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  throw new Error('Timeout waiting for Arduino motor to stop');
 }
 
 const BLOCK_TYPES = {
@@ -1477,6 +1498,7 @@ const BLOCK_TYPES = {
       });
       const d = await r.json();
       if (d.error) throw new Error(d.error);
+      await waitForArduinoMotorStop(p.motor, 120);
     }
   },
   'arduino-servo': {
