@@ -210,6 +210,31 @@ def cnc_status():
     return jsonify(resp)
 
 
+@app.route("/cnc/jog", methods=["POST"])
+def cnc_jog():
+    if not cnc.connected:
+        return jsonify({"error": "CNC not connected"}), 503
+    body = request.get_json(force=True)
+    x = float(body.get("x", 0))
+    y = float(body.get("y", 0))
+    a = float(body.get("a", 0))
+    feedrate = int(body.get("feedrate", 1000))
+    feedrate = max(100, min(5000, feedrate))
+    cmd = f"$J=G90 G21 X{x} Y{y} Z{a} F{feedrate}"
+    result = cnc.send_line(cmd)
+    if result is True:
+        return jsonify({"ok": True})
+    return jsonify({"error": str(result)}), 400
+
+
+@app.route("/cnc/jog/cancel", methods=["POST"])
+def cnc_jog_cancel():
+    if not cnc.connected:
+        return jsonify({"error": "CNC not connected"}), 503
+    cnc.jog_cancel()
+    return jsonify({"ok": True})
+
+
 @app.route("/arduino/status")
 def arduino_status():
     if not arduino.connected:
@@ -503,7 +528,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <span class="pos" id="arduino-pos">X:-- Z:-- B1:-- B2:--</span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
-  <span id="tag-status" style="margin-left:auto"></span>
+  <a href="/navigator" style="margin-left:auto; color:#8ab4f8; text-decoration:none; font-weight:600;">Point Navigator &rarr;</a>
+  <span id="tag-status"></span>
 </div>
 
 <div class="main-row">
@@ -865,6 +891,282 @@ document.addEventListener('keydown', (e) => {
 // Initial load
 refreshPoints();
 refreshPlot();
+</script>
+</body></html>"""
+
+
+@app.route("/navigator")
+def navigator():
+    return NAVIGATOR_HTML
+
+
+# ---------------------------------------------------------------------------
+# Navigator HTML
+# ---------------------------------------------------------------------------
+NAVIGATOR_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Point Navigator</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #1a1a2e; color: #e0e0e0; }
+  h1 { padding: 12px 20px; background: #16213e; font-size: 1.3rem; }
+
+  .status-bar { padding: 10px 20px; background: #0f3460; font-family: monospace;
+                 display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  .status-bar .pos { color: #8ab4f8; }
+  .status-bar .state { font-weight: bold; }
+  .state-idle { color: #4caf50; }
+  .state-run { color: #ff9800; }
+  .state-jog { color: #ff9800; }
+  .state-alarm { color: #f44336; }
+
+  .nav-bar { padding: 10px 20px; background: #16213e; display: flex; gap: 16px;
+             align-items: center; flex-wrap: wrap; border-bottom: 1px solid #333; }
+  .nav-bar a { color: #8ab4f8; text-decoration: none; font-weight: 600; font-size: 0.9rem; }
+  .nav-bar a:hover { text-decoration: underline; }
+  .btn-cancel { background: #f44336; color: #fff; border: none; border-radius: 6px;
+                padding: 7px 18px; font-weight: 600; cursor: pointer; font-size: 0.85rem; }
+  .btn-cancel:hover { opacity: 0.85; }
+  .btn-cancel:disabled { background: #555; color: #888; cursor: not-allowed; }
+  .nav-status { font-family: monospace; font-size: 0.85rem; color: #aaa; flex: 1; }
+  .feedrate-input { width: 70px; padding: 5px 6px; border: 1px solid #444; border-radius: 4px;
+                    background: #222; color: #e0e0e0; font-size: 0.85rem; text-align: center; }
+  .feedrate-label { font-size: 0.85rem; color: #aaa; }
+
+  .bottom-row { display: flex; gap: 12px; padding: 12px 20px; flex-wrap: wrap; }
+  .panel { background: #16213e; border-radius: 8px; padding: 12px; min-width: 300px; }
+  .panel h3 { margin-bottom: 8px; font-size: 0.95rem; color: #8ab4f8; }
+  .panel-plot { flex: 2; }
+  .panel-table { flex: 1; max-height: 500px; overflow-y: auto; }
+
+  #plot { width: 100%; height: 450px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid #333; }
+  th { color: #8ab4f8; }
+  .badge-inside  { color: #00bcd4; }
+  .badge-outside { color: #ff9800; }
+
+  .btn-go { background: #4caf50; color: #fff; border: none; border-radius: 4px;
+            padding: 3px 12px; cursor: pointer; font-size: 0.78rem; font-weight: 600; }
+  .btn-go:hover { opacity: 0.85; }
+  .btn-go:disabled { background: #555; color: #888; cursor: not-allowed; }
+
+  .row-active { background: rgba(76, 175, 80, 0.15); }
+</style>
+</head><body>
+
+<h1>Point Navigator</h1>
+
+<div class="status-bar">
+  <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? A=?.??&deg;</span></span>
+  <span class="state" id="cnc-state">--</span>
+  <span style="color:#666" id="cnc-conn">disconnected</span>
+</div>
+
+<div class="nav-bar">
+  <a href="/">&larr; Back to Capture</a>
+  <button class="btn-cancel" id="btn-cancel" onclick="cancelMove()" disabled>Cancel Move</button>
+  <span class="nav-status" id="nav-status"></span>
+  <span class="feedrate-label">Feedrate:</span>
+  <input type="number" class="feedrate-input" id="feedrate" value="1000" min="100" max="5000">
+  <span class="feedrate-label">mm/min</span>
+</div>
+
+<div class="bottom-row">
+  <div class="panel panel-plot">
+    <h3>Click a point to move CNC</h3>
+    <div id="plot"></div>
+  </div>
+  <div class="panel panel-table">
+    <h3>Captured Points</h3>
+    <table>
+      <thead><tr><th>#</th><th>Type</th><th>X</th><th>Y</th><th>A&deg;</th><th></th></tr></thead>
+      <tbody id="pts-body"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let allPoints = [];
+let cncConnected = false;
+let cncState = 'Unknown';
+let activeIdx = -1;
+let moving = false;
+
+// --- Poll CNC status ---
+function pollCNC() {
+  fetch('/cnc/status').then(r => r.json()).then(s => {
+    const p = s.wpos;
+    document.getElementById('cnc-pos').textContent =
+      `X=${p.x.toFixed(2)} Y=${p.y.toFixed(2)} A=${p.z.toFixed(2)}\u00B0`;
+    const st = document.getElementById('cnc-state');
+    cncState = s.state;
+    st.textContent = s.state;
+    st.className = 'state state-' + s.state.toLowerCase();
+    cncConnected = s.connected;
+    document.getElementById('cnc-conn').textContent = s.connected ? 'connected' : 'disconnected';
+
+    // Detect arrival (was moving, now Idle)
+    if (moving && s.state === 'Idle') {
+      moving = false;
+      document.getElementById('nav-status').textContent = `Arrived at #${activeIdx + 1}`;
+      document.getElementById('btn-cancel').disabled = true;
+    }
+
+    // Update Go button states
+    document.querySelectorAll('.btn-go').forEach(b => b.disabled = !s.connected);
+  }).catch(() => {});
+}
+setInterval(pollCNC, 500);
+pollCNC();
+
+// --- Fetch and render points ---
+function refreshPoints() {
+  fetch('/points').then(r => r.json()).then(data => {
+    allPoints = data;
+    renderTable();
+    renderPlot();
+  });
+}
+
+function renderTable() {
+  const tb = document.getElementById('pts-body');
+  tb.innerHTML = '';
+  allPoints.forEach((p, i) => {
+    const tr = document.createElement('tr');
+    if (i === activeIdx) tr.className = 'row-active';
+    const badge = p.type === 'inside' ? 'badge-inside' : 'badge-outside';
+    tr.innerHTML = `<td>${i + 1}</td>` +
+      `<td class="${badge}">${p.type}</td>` +
+      `<td>${p.x.toFixed(2)}</td>` +
+      `<td>${p.y.toFixed(2)}</td>` +
+      `<td>${p.a.toFixed(2)}</td>` +
+      `<td><button class="btn-go" onclick="goToPoint(${i})"${!cncConnected ? ' disabled' : ''}>Go</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+
+function renderPlot() {
+  const ins = allPoints.filter(p => p.type === 'inside');
+  const out = allPoints.filter(p => p.type === 'outside');
+
+  function makeTrace(pts, name, color, symbol) {
+    return {
+      x: pts.map(p => p.x),
+      y: pts.map(p => p.y),
+      customdata: pts.map(p => [allPoints.indexOf(p), p.x, p.y, p.a]),
+      text: pts.map(p => {
+        const idx = allPoints.indexOf(p) + 1;
+        return `#${idx} (${p.type})<br>X: ${p.x.toFixed(2)}<br>Y: ${p.y.toFixed(2)}<br>A: ${p.a.toFixed(2)}\u00B0`;
+      }),
+      hoverinfo: 'text',
+      mode: 'markers',
+      type: 'scatter',
+      name: name,
+      marker: { color: color, size: 10, symbol: symbol },
+    };
+  }
+
+  const traces = [
+    makeTrace(ins, 'Inside', '#00bcd4', 'circle'),
+    makeTrace(out, 'Outside', '#ff9800', 'diamond'),
+  ];
+
+  const layout = {
+    paper_bgcolor: '#16213e',
+    plot_bgcolor: '#16213e',
+    font: { color: '#e0e0e0' },
+    xaxis: { title: 'X (mm)', gridcolor: '#333', zerolinecolor: '#555',
+             scaleanchor: 'y', scaleratio: 1 },
+    yaxis: { title: 'Y (mm)', gridcolor: '#333', zerolinecolor: '#555' },
+    legend: { x: 0, y: 1, bgcolor: 'rgba(0,0,0,0.3)' },
+    margin: { l: 60, r: 20, t: 20, b: 50 },
+  };
+
+  Plotly.react('plot', traces, layout);
+
+  // Attach click handler
+  const plotEl = document.getElementById('plot');
+  plotEl.removeAllListeners && plotEl.removeAllListeners('plotly_click');
+  plotEl.on('plotly_click', function(data) {
+    if (data.points.length > 0) {
+      const cd = data.points[0].customdata;
+      if (cd) goToPoint(cd[0]);
+    }
+  });
+}
+
+// --- Go to point ---
+async function goToPoint(idx) {
+  if (!cncConnected || idx < 0 || idx >= allPoints.length) return;
+  const p = allPoints[idx];
+  const feedrate = clampFeedrate();
+
+  // Cancel current move if in progress
+  if (moving) {
+    await fetch('/cnc/jog/cancel', { method: 'POST' });
+    await new Promise(r => setTimeout(r, 200));
+  }
+
+  activeIdx = idx;
+  moving = true;
+  renderTable();
+  document.getElementById('nav-status').textContent = `Moving to #${idx + 1}...`;
+  document.getElementById('btn-cancel').disabled = false;
+
+  try {
+    const resp = await fetch('/cnc/jog', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ x: p.x, y: p.y, a: p.a, feedrate: feedrate }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      moving = false;
+      document.getElementById('nav-status').textContent = `Error: ${data.error}`;
+      document.getElementById('btn-cancel').disabled = true;
+    }
+  } catch (e) {
+    moving = false;
+    document.getElementById('nav-status').textContent = `Error: ${e.message}`;
+    document.getElementById('btn-cancel').disabled = true;
+  }
+}
+
+// --- Cancel move ---
+async function cancelMove() {
+  try {
+    await fetch('/cnc/jog/cancel', { method: 'POST' });
+  } catch (e) {}
+  moving = false;
+  document.getElementById('nav-status').textContent = 'Move cancelled';
+  document.getElementById('btn-cancel').disabled = true;
+}
+
+// --- Feedrate helper ---
+function clampFeedrate() {
+  const el = document.getElementById('feedrate');
+  let v = parseInt(el.value, 10);
+  if (isNaN(v) || v < 100) v = 100;
+  if (v > 5000) v = 5000;
+  el.value = v;
+  return v;
+}
+
+// --- Keyboard: Escape to cancel ---
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    cancelMove();
+  }
+});
+
+// Initial load
+refreshPoints();
 </script>
 </body></html>"""
 
