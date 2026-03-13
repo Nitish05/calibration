@@ -97,6 +97,13 @@ pose_lock = threading.Lock()
 shared_pose = (None, None)
 tag_detected = False
 
+# CNC / Arduino cached status (polled in background threads)
+cnc_status_lock = threading.Lock()
+cached_cnc_status = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
+
+arduino_status_lock = threading.Lock()
+cached_arduino_status = {"connected": False, "positions": {"x": 0, "z": 0, "byj1": 0, "byj2": 0}}
+
 # ---------------------------------------------------------------------------
 # Camera + AprilTag background thread
 # ---------------------------------------------------------------------------
@@ -181,6 +188,47 @@ if camera_available:
     t_cam = threading.Thread(target=camera_thread, daemon=True)
     t_cam.start()
 
+
+# ---------------------------------------------------------------------------
+# CNC / Arduino background polling threads
+# ---------------------------------------------------------------------------
+def cnc_poll_thread():
+    global cached_cnc_status
+    while True:
+        if not cnc.connected:
+            status = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
+        else:
+            raw = cnc.query_status()
+            if raw is None:
+                status = {"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}}
+            else:
+                status = raw
+                status["connected"] = True
+        status["camera_available"] = camera_available
+        status["tag_detected"] = tag_detected
+        with cnc_status_lock:
+            cached_cnc_status = status
+        time.sleep(0.1)
+
+
+def arduino_poll_thread():
+    global cached_arduino_status
+    while True:
+        if not arduino.connected:
+            status = {"connected": False, "positions": {"x": 0, "z": 0, "byj1": 0, "byj2": 0}}
+        else:
+            positions = arduino.query_positions()
+            if positions is None:
+                positions = {"x": 0, "z": 0, "byj1": 0, "byj2": 0}
+            status = {"connected": True, "positions": positions}
+        with arduino_status_lock:
+            cached_arduino_status = status
+        time.sleep(0.1)
+
+
+threading.Thread(target=cnc_poll_thread, daemon=True).start()
+threading.Thread(target=arduino_poll_thread, daemon=True).start()
+
 # ---------------------------------------------------------------------------
 # Flask app
 # ---------------------------------------------------------------------------
@@ -196,18 +244,8 @@ def index():
 
 @app.route("/cnc/status")
 def cnc_status():
-    if not cnc.connected:
-        resp = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
-    else:
-        status = cnc.query_status()
-        if status is None:
-            resp = {"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}}
-        else:
-            resp = status
-            resp["connected"] = True
-    resp["camera_available"] = camera_available
-    resp["tag_detected"] = tag_detected
-    return jsonify(resp)
+    with cnc_status_lock:
+        return jsonify(cached_cnc_status)
 
 
 @app.route("/cnc/jog", methods=["POST"])
@@ -237,12 +275,8 @@ def cnc_jog_cancel():
 
 @app.route("/arduino/status")
 def arduino_status():
-    if not arduino.connected:
-        return jsonify({"connected": False, "positions": {"x": 0, "z": 0, "byj1": 0, "byj2": 0}})
-    positions = arduino.query_positions()
-    if positions is None:
-        positions = {"x": 0, "z": 0, "byj1": 0, "byj2": 0}
-    return jsonify({"connected": True, "positions": positions})
+    with arduino_status_lock:
+        return jsonify(cached_arduino_status)
 
 
 @app.route("/arduino/move", methods=["POST"])
