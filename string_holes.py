@@ -21,6 +21,7 @@ from datetime import datetime
 from flask import Flask, Response, jsonify, request
 
 from cnc import CNCController
+from arduino_controller import ArduinoController
 
 # ---------------------------------------------------------------------------
 # Optional camera / vision imports
@@ -64,20 +65,22 @@ if _port:
 atexit.register(cnc.disconnect)
 
 # ---------------------------------------------------------------------------
-# CNC setup — auxiliary (linear Z up/down)
+# Arduino motor controller setup (6 actuators)
 # ---------------------------------------------------------------------------
-cnc_z = CNCController()
+arduino = ArduinoController()
 _port_z = args.serial_port_z
 if not os.path.exists(_port_z):
-    print(f"[CNC-Z] {_port_z} not found, Z-axis CNC not connected")
-    _port_z = None
+    print(f"[Arduino] {_port_z} not found, auto-detecting...")
+    _port_z = ArduinoController.find_serial_port()
 if _port_z:
     try:
-        cnc_z.connect(_port_z, args.baud)
+        arduino.connect(_port_z, args.baud)
     except Exception as e:
-        print(f"[CNC-Z] Connection failed: {e}")
+        print(f"[Arduino] Connection failed: {e}")
+else:
+    print("[Arduino] No Arduino found, motor controller not connected")
 
-atexit.register(cnc_z.disconnect)
+atexit.register(arduino.disconnect)
 
 # ---------------------------------------------------------------------------
 # State
@@ -187,7 +190,7 @@ app = Flask(__name__)
 @app.route("/")
 def index():
     html = INDEX_HTML.replace("__CAMERA_AVAILABLE__", "true" if camera_available else "false")
-    html = html.replace("__Z_CONNECTED__", "true" if cnc_z.connected else "false")
+    html = html.replace("__ARDUINO_CONNECTED__", "true" if arduino.connected else "false")
     return html
 
 
@@ -207,40 +210,69 @@ def cnc_status():
     return jsonify(resp)
 
 
-@app.route("/cnc_z/status")
-def cnc_z_status():
-    if not cnc_z.connected:
-        resp = {"connected": False, "state": "Disconnected", "wpos": {"x": 0, "y": 0, "z": 0}}
-    else:
-        status = cnc_z.query_status()
-        if status is None:
-            resp = {"connected": True, "state": "No response", "wpos": {"x": 0, "y": 0, "z": 0}}
-        else:
-            resp = status
-            resp["connected"] = True
-    return jsonify(resp)
+@app.route("/arduino/status")
+def arduino_status():
+    if not arduino.connected:
+        return jsonify({"connected": False, "positions": {"x": 0, "z": 0, "byj1": 0, "byj2": 0}})
+    positions = arduino.query_positions()
+    if positions is None:
+        positions = {"x": 0, "z": 0, "byj1": 0, "byj2": 0}
+    return jsonify({"connected": True, "positions": positions})
 
 
-@app.route("/cnc_z/jog", methods=["POST"])
-def cnc_z_jog():
-    if not cnc_z.connected:
-        return jsonify({"error": "Z-axis CNC not connected"}), 503
+@app.route("/arduino/move", methods=["POST"])
+def arduino_move():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
     body = request.get_json(force=True)
-    direction = body.get("dir", "up")
-    dist = float(body.get("dist", 1.0))
-    feed = float(body.get("feed", 300))
-    if direction == "down":
-        dist = -dist
-    result = cnc_z.send_line(f"$J=G91 G21 Z{dist} F{feed}")
-    return jsonify({"ok": result is True, "result": str(result)})
+    motor = body.get("motor")
+    steps = int(body.get("steps", 0))
+    dispatch = {"x": arduino.move_x, "z": arduino.move_z,
+                "byj1": arduino.move_byj1, "byj2": arduino.move_byj2}
+    fn = dispatch.get(motor)
+    if fn is None:
+        return jsonify({"error": f"Unknown motor: {motor}"}), 400
+    resp = fn(steps)
+    return jsonify({"ok": True, "response": resp})
 
 
-@app.route("/cnc_z/jog/cancel", methods=["POST"])
-def cnc_z_jog_cancel():
-    if not cnc_z.connected:
-        return jsonify({"error": "Z-axis CNC not connected"}), 503
-    cnc_z.jog_cancel()
-    return jsonify({"ok": True})
+@app.route("/arduino/servo", methods=["POST"])
+def arduino_servo():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
+    body = request.get_json(force=True)
+    angle = int(body.get("angle", 90))
+    resp = arduino.set_servo(angle)
+    return jsonify({"ok": True, "response": resp})
+
+
+@app.route("/arduino/dc", methods=["POST"])
+def arduino_dc():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
+    body = request.get_json(force=True)
+    action = body.get("action", "stop")
+    speed = int(body.get("speed", 50))
+    if action == "forward":
+        resp = arduino.dc_forward(speed)
+    elif action == "reverse":
+        resp = arduino.dc_reverse(speed)
+    else:
+        resp = arduino.dc_stop()
+    return jsonify({"ok": True, "response": resp})
+
+
+@app.route("/arduino/reset", methods=["POST"])
+def arduino_reset():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
+    body = request.get_json(force=True)
+    mode = body.get("mode", "all")
+    if mode == "steppers":
+        resp = arduino.reset_steppers()
+    else:
+        resp = arduino.reset()
+    return jsonify({"ok": True, "response": resp})
 
 
 @app.route("/feed")
@@ -423,11 +455,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .btn-clear   { background: #f44336; color: #fff; }
   .btn-export  { background: #9c27b0; color: #fff; }
   .btn-import  { background: #3f51b5; color: #fff; }
-  .btn-jog-up, .btn-jog-down { background: #009688; color: #fff; }
-  .btn-jog-up:disabled, .btn-jog-down:disabled { background: #444; color: #777; cursor: not-allowed; opacity: 0.6; }
-  .z-section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #333;
-                     padding-top: 8px; margin-top: 2px; }
-  .z-conn { font-size: 0.75rem; }
+  .arduino-section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #333;
+                           padding-top: 8px; margin-top: 2px; }
+  .arduino-conn { font-size: 0.75rem; }
+  .motor-row { display: flex; align-items: center; gap: 4px; }
+  .motor-row label { font-size: 0.78rem; min-width: 38px; color: #ccc; }
+  .motor-input { width: 56px; padding: 5px 4px; border: 1px solid #444; border-radius: 4px;
+                 background: #222; color: #e0e0e0; font-size: 0.82rem; text-align: center; }
+  .motor-input:disabled { opacity: 0.4; }
+  .btn-motor { background: #009688; color: #fff; padding: 6px 8px; font-size: 0.78rem;
+               width: auto; min-width: 0; flex: 1; }
+  .btn-motor:disabled { background: #444; color: #777; cursor: not-allowed; opacity: 0.6; }
+  .btn-dc-fwd { background: #4caf50; color: #fff; }
+  .btn-dc-rev { background: #ff9800; color: #fff; }
+  .btn-dc-stop { background: #f44336; color: #fff; }
+  .btn-reset { background: #607d8b; color: #fff; font-size: 0.78rem; width: auto; flex: 1; }
 
   .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
          padding: 1px 7px; font-family: monospace; font-size: 0.75rem; color: #aaa; }
@@ -458,7 +500,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <div class="status-bar">
   <span>CNC: <span class="pos" id="cnc-pos">X=?.?? Y=?.?? A(angle)=?.??&deg;</span></span>
   <span style="color:#666; margin-left:4px;">|</span>
-  <span class="pos" id="cnc-z-pos">Z: --</span>
+  <span class="pos" id="arduino-pos">X:-- Z:-- B1:-- B2:--</span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
   <span id="tag-status" style="margin-left:auto"></span>
@@ -485,9 +527,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <button class="btn-export" onclick="exportJSON()">Export</button>
     <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
     <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
-    <div class="z-section-label">Z Axis <span class="z-conn" id="z-conn-label">(disconnected)</span></div>
-    <button class="btn-jog-up" id="btn-jog-up" onclick="jogZ('up')" disabled>&#x25B2; Up</button>
-    <button class="btn-jog-down" id="btn-jog-down" onclick="jogZ('down')" disabled>&#x25BC; Down</button>
+    <div class="arduino-section-label">Arduino Motors <span class="arduino-conn" id="arduino-conn-label">(disconnected)</span></div>
+    <div class="motor-row"><label>Z</label><input type="number" class="motor-input" id="steps-z" value="100" min="1"><button class="btn-motor" onclick="moveMotor('z',1)">&#x25B2; Up</button><button class="btn-motor" onclick="moveMotor('z',-1)">&#x25BC; Down</button></div>
+    <div class="motor-row"><label>X</label><input type="number" class="motor-input" id="steps-x" value="100" min="1"><button class="btn-motor" onclick="moveMotor('x',1)">&#x2192; Fwd</button><button class="btn-motor" onclick="moveMotor('x',-1)">&#x2190; Back</button></div>
+    <div class="motor-row"><label>BYJ1</label><input type="number" class="motor-input" id="steps-byj1" value="100" min="1"><button class="btn-motor" onclick="moveMotor('byj1',1)">CW</button><button class="btn-motor" onclick="moveMotor('byj1',-1)">CCW</button></div>
+    <div class="motor-row"><label>BYJ2</label><input type="number" class="motor-input" id="steps-byj2" value="100" min="1"><button class="btn-motor" onclick="moveMotor('byj2',1)">CW</button><button class="btn-motor" onclick="moveMotor('byj2',-1)">CCW</button></div>
+    <div class="motor-row"><label>Servo</label><input type="number" class="motor-input" id="servo-angle" value="90" min="0" max="180"><button class="btn-motor" onclick="sendServo()">Set</button></div>
+    <div class="motor-row"><label>DC</label><input type="number" class="motor-input" id="dc-speed" value="50" min="0" max="100"><button class="btn-motor btn-dc-fwd" onclick="dcControl('forward')">Fwd</button><button class="btn-motor btn-dc-rev" onclick="dcControl('reverse')">Rev</button><button class="btn-motor btn-dc-stop" onclick="dcControl('stop')">Stop</button></div>
+    <div class="motor-row"><button class="btn-reset btn-motor" onclick="resetArduino('steppers')">Reset Steppers</button><button class="btn-reset btn-motor" onclick="resetArduino('all')">Reset All</button></div>
   </div>
 </div>
 
@@ -509,7 +556,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <script>
 const CAMERA_AVAILABLE = __CAMERA_AVAILABLE__;
-let Z_CONNECTED = __Z_CONNECTED__;
+let ARDUINO_CONNECTED = __ARDUINO_CONNECTED__;
 const CAM_W = 1920, CAM_H = 1080;
 let currentType = 'inside';
 let plotInitialized = false;
@@ -604,20 +651,21 @@ function pollCNC() {
     }
   }).catch(() => {});
 
-  // Poll Z-axis CNC
-  fetch('/cnc_z/status').then(r => r.json()).then(s => {
-    Z_CONNECTED = s.connected;
-    const zPosEl = document.getElementById('cnc-z-pos');
+  // Poll Arduino motor controller
+  fetch('/arduino/status').then(r => r.json()).then(s => {
+    ARDUINO_CONNECTED = s.connected;
+    const posEl = document.getElementById('arduino-pos');
+    const p = s.positions;
     if (s.connected) {
-      zPosEl.textContent = `Z: ${s.wpos.z.toFixed(2)} mm`;
+      posEl.textContent = `X:${p.x} Z:${p.z} B1:${p.byj1} B2:${p.byj2}`;
     } else {
-      zPosEl.textContent = 'Z: --';
+      posEl.textContent = 'X:-- Z:-- B1:-- B2:--';
     }
-    const label = document.getElementById('z-conn-label');
+    const label = document.getElementById('arduino-conn-label');
     label.textContent = s.connected ? '(connected)' : '(disconnected)';
     label.style.color = s.connected ? '#4caf50' : '#888';
-    document.getElementById('btn-jog-up').disabled = !s.connected;
-    document.getElementById('btn-jog-down').disabled = !s.connected;
+    document.querySelectorAll('.btn-motor').forEach(b => b.disabled = !s.connected);
+    document.querySelectorAll('.motor-input').forEach(i => i.disabled = !s.connected);
   }).catch(() => {});
 }
 setInterval(pollCNC, 500);
@@ -768,13 +816,41 @@ function importJSON(input) {
   input.value = '';
 }
 
-// --- Z-axis jog ---
-function jogZ(dir) {
-  if (!Z_CONNECTED) return;
-  fetch('/cnc_z/jog', {
+// --- Arduino motor controls ---
+function moveMotor(motor, direction) {
+  if (!ARDUINO_CONNECTED) return;
+  const input = document.getElementById('steps-' + motor);
+  const steps = parseInt(input.value, 10) * direction;
+  fetch('/arduino/move', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({dir: dir, dist: 1.0, feed: 300}),
+    body: JSON.stringify({motor: motor, steps: steps}),
+  }).then(r => r.json()).catch(() => {});
+}
+function sendServo() {
+  if (!ARDUINO_CONNECTED) return;
+  const angle = parseInt(document.getElementById('servo-angle').value, 10);
+  fetch('/arduino/servo', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({angle: angle}),
+  }).then(r => r.json()).catch(() => {});
+}
+function dcControl(action) {
+  if (!ARDUINO_CONNECTED) return;
+  const speed = parseInt(document.getElementById('dc-speed').value, 10);
+  fetch('/arduino/dc', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: action, speed: speed}),
+  }).then(r => r.json()).catch(() => {});
+}
+function resetArduino(mode) {
+  if (!ARDUINO_CONNECTED) return;
+  fetch('/arduino/reset', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({mode: mode}),
   }).then(r => r.json()).catch(() => {});
 }
 
