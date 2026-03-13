@@ -1423,6 +1423,21 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 // =========================================================================
 // Block Type Registry
 // =========================================================================
+
+async function waitForCncIdle(timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000;
+  // Small initial delay to let GRBL transition out of Idle into Jog/Run
+  await new Promise(r => setTimeout(r, 300));
+  while (Date.now() < deadline) {
+    if (stopFlag) return;
+    const r = await fetch('/cnc/status');
+    const d = await r.json();
+    if (d.state === 'Idle') return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error('Timeout waiting for CNC idle');
+}
+
 const BLOCK_TYPES = {
   'cnc-goto': {
     name: 'CNC Go To', category: 'CNC', color: '#1565C0',
@@ -1440,6 +1455,7 @@ const BLOCK_TYPES = {
       });
       const d = await r.json();
       if (d.error) throw new Error(d.error);
+      await waitForCncIdle(120);
     }
   },
   'cnc-cancel': {
