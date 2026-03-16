@@ -1376,8 +1376,8 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   .step-connector::before { top: 0; height: 8px; }
   .step-connector::after { bottom: 0; height: 8px; }
   .step-connector .conn-drop { width: 28px; height: 28px; border: 2px dashed #334155; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center; color: #475569; font-size: 1rem;
-    font-weight: 600; cursor: pointer; transition: all 0.15s; background: #0b1121; z-index: 1; }
+    display: grid; place-items: center; color: #475569; font-size: 0.85rem; line-height: 1;
+    cursor: pointer; transition: all 0.15s; background: #0b1121; z-index: 1; }
   .step-connector .conn-drop:hover, .step-connector.drag-over .conn-drop { border-color: #3b82f6;
     color: #3b82f6; background: rgba(37,99,235,0.1); }
   .step-connector.drag-over { transform: scaleY(1.3); }
@@ -2024,7 +2024,7 @@ function makeConnector(insertIdx) {
   const conn = document.createElement('div');
   conn.className = 'step-connector';
   conn.dataset.insertIdx = insertIdx;
-  conn.innerHTML = '<div class="conn-drop">+</div>';
+  conn.innerHTML = '<div class="conn-drop"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="5" y="1" width="2" height="10" rx="1"/><rect x="1" y="5" width="10" height="2" rx="1"/></svg></div>';
   conn.addEventListener('dragover', (e) => { e.preventDefault(); conn.classList.add('drag-over'); });
   conn.addEventListener('dragleave', () => { conn.classList.remove('drag-over'); });
   conn.addEventListener('drop', (e) => {
