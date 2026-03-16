@@ -1370,7 +1370,7 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   .step-row:hover .step-add-parallel { opacity: 1; }
   .step-add-parallel:hover { border-color: #475569; color: #64748b; background: rgba(30,41,59,0.3); }
   .step-connector { display: flex; align-items: center; justify-content: center; height: 28px;
-    margin-bottom: 8px; position: relative; }
+    margin-bottom: 8px; position: relative; margin-right: 46px; }
   .step-connector::before, .step-connector::after { content: ''; position: absolute; left: 50%;
     width: 2px; background: #334155; transform: translateX(-50%); }
   .step-connector::before { top: 0; height: 8px; }
