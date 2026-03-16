@@ -1369,10 +1369,18 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
     font-size: 1.2rem; cursor: pointer; transition: all 0.15s; flex-shrink: 0; opacity: 0; }
   .step-row:hover .step-add-parallel { opacity: 1; }
   .step-add-parallel:hover { border-color: #475569; color: #64748b; background: rgba(30,41,59,0.3); }
-  .step-connector { display: flex; justify-content: center; height: 0; margin-bottom: 16px;
-    position: relative; }
-  .step-connector::after { content: ''; position: absolute; top: -8px; width: 2px; height: 16px;
-    background: #334155; border-radius: 1px; }
+  .step-connector { display: flex; align-items: center; justify-content: center; height: 28px;
+    margin-bottom: 8px; position: relative; }
+  .step-connector::before, .step-connector::after { content: ''; position: absolute; left: 50%;
+    width: 2px; background: #334155; transform: translateX(-50%); }
+  .step-connector::before { top: 0; height: 8px; }
+  .step-connector::after { bottom: 0; height: 8px; }
+  .step-connector .conn-drop { width: 28px; height: 28px; border: 2px dashed #334155; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; color: #475569; font-size: 1rem;
+    font-weight: 600; cursor: pointer; transition: all 0.15s; background: #0b1121; z-index: 1; }
+  .step-connector .conn-drop:hover, .step-connector.drag-over .conn-drop { border-color: #3b82f6;
+    color: #3b82f6; background: rgba(37,99,235,0.1); }
+  .step-connector.drag-over { transform: scaleY(1.3); }
   .canvas-empty { color: #475569; text-align: center; padding-top: 120px; font-size: 0.9rem;
                   position: absolute; top: 0; left: 0; right: 0; pointer-events: none; z-index: 1; }
 
@@ -1808,6 +1816,10 @@ function buildPalette() {
       el.className = 'palette-block ' + cs.pal;
       el.textContent = item.name;
       el.dataset.blockType = item.key;
+      el.draggable = true;
+      el.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/block-type', item.key);
+      });
       list.appendChild(el);
     }
     sec.appendChild(list);
@@ -2008,19 +2020,38 @@ function renderStep(step, stepIdx) {
   return row;
 }
 
+function makeConnector(insertIdx) {
+  const conn = document.createElement('div');
+  conn.className = 'step-connector';
+  conn.dataset.insertIdx = insertIdx;
+  conn.innerHTML = '<div class="conn-drop">+</div>';
+  conn.addEventListener('dragover', (e) => { e.preventDefault(); conn.classList.add('drag-over'); });
+  conn.addEventListener('dragleave', () => { conn.classList.remove('drag-over'); });
+  conn.addEventListener('drop', (e) => {
+    e.preventDefault();
+    conn.classList.remove('drag-over');
+    const typeKey = e.dataTransfer.getData('text/block-type');
+    if (!typeKey) return;
+    const newBlock = makeBlockFromType(typeKey);
+    if (!newBlock) return;
+    const idx = parseInt(conn.dataset.insertIdx, 10);
+    steps.splice(idx, 0, [newBlock]);
+    renderAllSteps();
+    autoSave();
+  });
+  return conn;
+}
+
 function renderAllSteps() {
   const inner = document.getElementById('canvas-inner');
   const empty = document.getElementById('canvas-empty');
   inner.innerHTML = '';
   const totalBlocks = steps.reduce((s, step) => s + step.length, 0);
   empty.style.display = totalBlocks === 0 ? '' : 'none';
+  if (totalBlocks > 0) inner.appendChild(makeConnector(0));
   steps.forEach((step, si) => {
-    if (si > 0) {
-      const conn = document.createElement('div');
-      conn.className = 'step-connector';
-      inner.appendChild(conn);
-    }
     inner.appendChild(renderStep(step, si));
+    inner.appendChild(makeConnector(si + 1));
   });
   initInnerSortables();
 }
