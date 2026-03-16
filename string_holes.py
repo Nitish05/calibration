@@ -1357,8 +1357,8 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
 
   /* Step rows for parallel execution */
   .step-row { display: flex; gap: 10px; align-items: stretch; position: relative;
-              margin-bottom: 16px; }
-  .step-row .block { flex: 1; min-width: 0; margin-bottom: 0; }
+              margin-bottom: 16px; flex-wrap: wrap; }
+  .step-row .block { flex: 1; min-width: 180px; margin-bottom: 0; }
   .step-row.parallel { padding-left: 28px; }
   .step-row.parallel::before { content: ''; position: absolute; left: 6px; top: 8px; bottom: 8px;
     width: 3px; background: linear-gradient(180deg, #7c3aed, #3b82f6); border-radius: 2px; }
