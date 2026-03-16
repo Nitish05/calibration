@@ -1225,13 +1225,15 @@ def sequencer():
 def sequencer_save():
     body = request.get_json(force=True)
     name = body.get("name", "").strip()
-    blocks = body.get("blocks", [])
+    steps = body.get("steps", [])
+    if not steps and "blocks" in body:
+        steps = [[b] for b in body["blocks"]]
     if not name:
         return jsonify({"error": "Name required"}), 400
     safe = "".join(c for c in name if c.isalnum() or c in " _-").strip()
     path = os.path.join("data/sequences", safe + ".json")
     with open(path, "w") as f:
-        json.dump({"name": name, "blocks": blocks}, f, indent=2)
+        json.dump({"name": name, "steps": steps}, f, indent=2)
     return jsonify({"ok": True})
 
 
@@ -1351,7 +1353,26 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
             background-size: 20px 20px; }
   .canvas.panning { cursor: grabbing; }
   .canvas-inner { position: absolute; top: 0; left: 0; transform-origin: 0 0;
-                  width: 460px; padding: 40px 16px 80px; }
+                  width: 560px; padding: 40px 16px 80px; }
+
+  /* Step rows for parallel execution */
+  .step-row { display: flex; gap: 10px; align-items: stretch; position: relative;
+              margin-bottom: 16px; }
+  .step-row .block { flex: 1; min-width: 0; margin-bottom: 0; }
+  .step-row.parallel { padding-left: 28px; }
+  .step-row.parallel::before { content: ''; position: absolute; left: 6px; top: 8px; bottom: 8px;
+    width: 3px; background: linear-gradient(180deg, #7c3aed, #3b82f6); border-radius: 2px; }
+  .step-row.parallel::after { content: 'PARALLEL'; position: absolute; left: 0; top: -12px;
+    font-size: 0.55rem; color: #7c3aed; letter-spacing: 1px; font-weight: 600; }
+  .step-add-parallel { width: 36px; min-width: 36px; display: flex; align-items: center;
+    justify-content: center; border: 2px dashed #1e293b; border-radius: 10px; color: #334155;
+    font-size: 1.2rem; cursor: pointer; transition: all 0.15s; flex-shrink: 0; opacity: 0; }
+  .step-row:hover .step-add-parallel { opacity: 1; }
+  .step-add-parallel:hover { border-color: #475569; color: #64748b; background: rgba(30,41,59,0.3); }
+  .step-connector { display: flex; justify-content: center; height: 0; margin-bottom: 16px;
+    position: relative; }
+  .step-connector::after { content: ''; position: absolute; top: -8px; width: 2px; height: 16px;
+    background: #334155; border-radius: 1px; }
   .canvas-empty { color: #475569; text-align: center; padding-top: 120px; font-size: 0.9rem;
                   position: absolute; top: 0; left: 0; right: 0; pointer-events: none; z-index: 1; }
 
@@ -1494,9 +1515,9 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
       <div class="canvas-inner" id="canvas-inner"></div>
     </div>
     <div class="zoom-controls">
-      <button onclick="zoomBy(-ZOOM_STEP)" title="Zoom out">&minus;</button>
+      <button onclick="zoomBy(-ZOOM_BTN_STEP)" title="Zoom out">&minus;</button>
       <span id="zoom-badge" onclick="resetView()" title="Reset view">100%</span>
-      <button onclick="zoomBy(ZOOM_STEP)" title="Zoom in">&plus;</button>
+      <button onclick="zoomBy(ZOOM_BTN_STEP)" title="Zoom in">&plus;</button>
     </div>
   </section>
 </main>
@@ -1731,15 +1752,37 @@ const BLOCK_TYPES = {
 // =========================================================================
 // State
 // =========================================================================
-let blocks = [];        // [{id, type, params:{}}]
+let steps = [];         // [ [{id, type, params:{}}], [{id,...},{id,...}], ... ]
 let nextId = 1;
 let selectedIds = new Set();
-let macroPreviewOpen = new Set();  // block ids with expanded macro preview
+let macroPreviewOpen = new Set();
 let clipboard = [];
 let stopFlag = false;
 let running = false;
 let loadedMacros = [];
-let cachedPoints = [];  // [{type, x, y, a, timestamp}]
+let cachedPoints = [];
+
+// =========================================================================
+// Steps helpers
+// =========================================================================
+function findBlock(id) {
+  for (const step of steps) for (const b of step) if (b.id == id) return b;
+  return null;
+}
+function allBlocks() { return steps.flat(); }
+function findStepAndIndex(id) {
+  for (let si = 0; si < steps.length; si++)
+    for (let bi = 0; bi < steps[si].length; bi++)
+      if (steps[si][bi].id == id) return { stepIdx: si, blockIdx: bi };
+  return null;
+}
+function removeBlock(id) {
+  for (let si = steps.length - 1; si >= 0; si--) {
+    steps[si] = steps[si].filter(b => b.id !== id);
+    if (steps[si].length === 0) steps.splice(si, 1);
+  }
+}
+function migrateBlocksToSteps(oldBlocks) { return oldBlocks.map(b => [b]); }
 
 // =========================================================================
 // Palette rendering
@@ -1837,7 +1880,7 @@ function renderBlock(b, idx) {
         inp.dataset.paramKey = 'point';
         inp.dataset.blockId = b.id;
         inp.addEventListener('change', (e) => {
-          const block = blocks.find(x => x.id == e.target.dataset.blockId);
+          const block = findBlock(e.target.dataset.blockId);
           if (!block) return;
           const idx = e.target.value;
           block.params.point = idx;
@@ -1846,7 +1889,7 @@ function renderBlock(b, idx) {
             block.params.x = pt.x; block.params.y = pt.y; block.params.a = pt.a;
           }
           autoSave();
-          renderAllBlocks();
+          renderAllSteps();
         });
         lbl.appendChild(inp);
         body.appendChild(lbl);
@@ -1871,7 +1914,7 @@ function renderBlock(b, idx) {
       inp.dataset.paramKey = p.key;
       inp.dataset.blockId = b.id;
       inp.addEventListener('change', (e) => {
-        const block = blocks.find(x => x.id == e.target.dataset.blockId);
+        const block = findBlock(e.target.dataset.blockId);
         if (block) {
           block.params[e.target.dataset.paramKey] = e.target.value;
           autoSave();
@@ -1939,7 +1982,7 @@ function renderBlock(b, idx) {
     if (!selectedIds.has(b.id)) {
       selectedIds.clear();
       selectedIds.add(b.id);
-      renderAllBlocks();
+      renderAllSteps();
     }
     showContextMenu(e.clientX, e.clientY);
   });
@@ -1947,43 +1990,133 @@ function renderBlock(b, idx) {
   return el;
 }
 
-function renderAllBlocks() {
+function renderStep(step, stepIdx) {
+  const row = document.createElement('div');
+  row.className = 'step-row' + (step.length > 1 ? ' parallel' : '');
+  row.dataset.stepIdx = stepIdx;
+  let globalIdx = 0;
+  for (let i = 0; i < stepIdx; i++) globalIdx += steps[i].length;
+  step.forEach((b, bi) => {
+    const el = renderBlock(b, globalIdx + bi);
+    if (el) row.appendChild(el);
+  });
+  const addZone = document.createElement('div');
+  addZone.className = 'step-add-parallel';
+  addZone.innerHTML = '+';
+  addZone.title = 'Drop a block here to run in parallel';
+  row.appendChild(addZone);
+  return row;
+}
+
+function renderAllSteps() {
   const inner = document.getElementById('canvas-inner');
   const empty = document.getElementById('canvas-empty');
   inner.innerHTML = '';
-  empty.style.display = blocks.length === 0 ? '' : 'none';
-  blocks.forEach((b, i) => {
-    const el = renderBlock(b, i);
-    if (el) inner.appendChild(el);
+  const totalBlocks = steps.reduce((s, step) => s + step.length, 0);
+  empty.style.display = totalBlocks === 0 ? '' : 'none';
+  steps.forEach((step, si) => {
+    if (si > 0) {
+      const conn = document.createElement('div');
+      conn.className = 'step-connector';
+      inner.appendChild(conn);
+    }
+    inner.appendChild(renderStep(step, si));
   });
+  initInnerSortables();
 }
 
 // =========================================================================
 // SortableJS on canvas
 // =========================================================================
 let canvasSortable;
+let innerSortables = [];
+
 function initCanvasSortable() {
   canvasSortable = new Sortable(document.getElementById('canvas-inner'), {
-    group: { name: 'blocks', pull: false, put: true },
+    group: { name: 'canvas', pull: false, put: ['blocks'] },
     animation: 150,
+    draggable: '.step-row',
+    filter: '.step-connector',
     handle: '.block-header',
     onAdd: function(evt) {
+      // Palette block dropped between step rows -> new step
       const typeKey = evt.item.dataset.blockType;
       const newBlock = makeBlockFromType(typeKey);
       evt.item.remove();
       if (!newBlock) return;
-      const idx = Math.min(evt.newIndex, blocks.length);
-      blocks.splice(idx, 0, newBlock);
-      renderAllBlocks();
+      // Count only step-rows (skip connectors) for index
+      const rowEls = [...document.getElementById('canvas-inner').children].filter(c => c.classList.contains('step-row'));
+      let stepIdx = 0;
+      for (let i = 0; i < rowEls.length; i++) { if (rowEls[i] === evt.item) break; stepIdx = i; }
+      stepIdx = Math.min(evt.newDraggableIndex != null ? evt.newDraggableIndex : steps.length, steps.length);
+      steps.splice(stepIdx, 0, [newBlock]);
+      renderAllSteps();
       autoSave();
     },
     onUpdate: function(evt) {
-      if (evt.oldIndex === evt.newIndex) return;
-      const item = blocks.splice(evt.oldIndex, 1)[0];
-      blocks.splice(evt.newIndex, 0, item);
-      renderAllBlocks();
+      const oldIdx = evt.oldDraggableIndex;
+      const newIdx = evt.newDraggableIndex;
+      if (oldIdx === newIdx) return;
+      const item = steps.splice(oldIdx, 1)[0];
+      steps.splice(newIdx, 0, item);
+      renderAllSteps();
       autoSave();
     }
+  });
+}
+
+function initInnerSortables() {
+  innerSortables.forEach(s => s.destroy());
+  innerSortables = [];
+  document.querySelectorAll('.step-row').forEach((row) => {
+    const stepIdx = parseInt(row.dataset.stepIdx, 10);
+    const sortable = new Sortable(row, {
+      group: { name: 'blocks', pull: true, put: true },
+      animation: 150,
+      handle: '.block-header',
+      draggable: '.block',
+      filter: '.step-add-parallel',
+      fallbackOnBody: true,
+      swapThreshold: 0.65,
+      direction: 'horizontal',
+      onAdd: function(evt) {
+        const typeKey = evt.item.dataset.blockType;
+        if (typeKey) {
+          // From palette
+          const newBlock = makeBlockFromType(typeKey);
+          evt.item.remove();
+          if (!newBlock) return;
+          const idx = Math.min(evt.newDraggableIndex != null ? evt.newDraggableIndex : steps[stepIdx].length, steps[stepIdx].length);
+          steps[stepIdx].splice(idx, 0, newBlock);
+        } else {
+          // From another step row
+          const blockId = parseInt(evt.item.dataset.id, 10);
+          const srcPos = findStepAndIndex(blockId);
+          if (!srcPos) { evt.item.remove(); renderAllSteps(); autoSave(); return; }
+          const block = steps[srcPos.stepIdx].splice(srcPos.blockIdx, 1)[0];
+          if (steps[srcPos.stepIdx].length === 0) {
+            steps.splice(srcPos.stepIdx, 1);
+          }
+          // Recalculate target step index (may have shifted after source cleanup)
+          const tgtIdx = Math.min(stepIdx < steps.length ? stepIdx : steps.length - 1, steps.length - 1);
+          const blkIdx = Math.min(evt.newDraggableIndex != null ? evt.newDraggableIndex : steps[tgtIdx].length, steps[tgtIdx].length);
+          steps[tgtIdx].splice(blkIdx, 0, block);
+        }
+        renderAllSteps();
+        autoSave();
+      },
+      onUpdate: function(evt) {
+        if (evt.oldDraggableIndex === evt.newDraggableIndex) return;
+        const item = steps[stepIdx].splice(evt.oldDraggableIndex, 1)[0];
+        steps[stepIdx].splice(evt.newDraggableIndex, 0, item);
+        renderAllSteps();
+        autoSave();
+      },
+      onRemove: function(evt) {
+        // Block was pulled out — handled by target's onAdd
+      }
+    });
+    innerSortables.push(sortable);
   });
 }
 
@@ -1991,26 +2124,27 @@ function initCanvasSortable() {
 // Selection
 // =========================================================================
 function handleSelect(id, e) {
+  const all = allBlocks();
   if (e.ctrlKey || e.metaKey) {
     if (selectedIds.has(id)) selectedIds.delete(id);
     else selectedIds.add(id);
   } else if (e.shiftKey && selectedIds.size > 0) {
     const lastId = [...selectedIds].pop();
-    const lastIdx = blocks.findIndex(b => b.id === lastId);
-    const curIdx = blocks.findIndex(b => b.id === id);
+    const lastIdx = all.findIndex(b => b.id === lastId);
+    const curIdx = all.findIndex(b => b.id === id);
     const [from, to] = lastIdx < curIdx ? [lastIdx, curIdx] : [curIdx, lastIdx];
-    for (let i = from; i <= to; i++) selectedIds.add(blocks[i].id);
+    for (let i = from; i <= to; i++) selectedIds.add(all[i].id);
   } else {
     selectedIds.clear();
     selectedIds.add(id);
   }
-  renderAllBlocks();
+  renderAllSteps();
 }
 
 function deleteBlock(id) {
-  blocks = blocks.filter(b => b.id !== id);
+  removeBlock(id);
   selectedIds.delete(id);
-  renderAllBlocks();
+  renderAllSteps();
   autoSave();
 }
 
@@ -2019,36 +2153,37 @@ document.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selectedIds.size > 0) {
-      blocks = blocks.filter(b => !selectedIds.has(b.id));
+      for (const id of selectedIds) removeBlock(id);
       selectedIds.clear();
-      renderAllBlocks();
+      renderAllSteps();
       autoSave();
     }
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
     e.preventDefault();
     selectedIds.clear();
-    blocks.forEach(b => selectedIds.add(b.id));
-    renderAllBlocks();
+    allBlocks().forEach(b => selectedIds.add(b.id));
+    renderAllSteps();
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
     if (selectedIds.size > 0) {
-      clipboard = blocks.filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
+      clipboard = allBlocks().filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
     }
   }
   if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
     if (clipboard.length > 0) {
       const newBlocks = clipboard.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
-      let insertIdx = blocks.length;
+      let insertStepIdx = steps.length;
       if (selectedIds.size > 0) {
         const lastSelId = [...selectedIds].pop();
-        const lastSelIdx = blocks.findIndex(b => b.id === lastSelId);
-        if (lastSelIdx >= 0) insertIdx = lastSelIdx + 1;
+        const pos = findStepAndIndex(lastSelId);
+        if (pos) insertStepIdx = pos.stepIdx + 1;
       }
-      blocks.splice(insertIdx, 0, ...newBlocks);
+      const newSteps = newBlocks.map(b => [b]);
+      steps.splice(insertStepIdx, 0, ...newSteps);
       selectedIds.clear();
       newBlocks.forEach(b => selectedIds.add(b.id));
-      renderAllBlocks();
+      renderAllSteps();
       autoSave();
     }
   }
@@ -2057,9 +2192,9 @@ document.addEventListener('keydown', (e) => {
 // Click on canvas background to deselect (skip if we just panned)
 document.getElementById('canvas').addEventListener('click', (e) => {
   if (didPan) { didPan = false; return; }
-  if (e.target.id === 'canvas' || e.target.id === 'canvas-inner') {
+  if (e.target.id === 'canvas' || e.target.id === 'canvas-inner' || e.target.classList.contains('step-connector')) {
     selectedIds.clear();
-    renderAllBlocks();
+    renderAllSteps();
   }
 });
 
@@ -2078,46 +2213,50 @@ document.addEventListener('click', () => {
 });
 
 function ctxCopy() {
-  clipboard = blocks.filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
+  clipboard = allBlocks().filter(b => selectedIds.has(b.id)).map(b => JSON.parse(JSON.stringify(b)));
 }
 
 function ctxPaste() {
   if (clipboard.length === 0) return;
   const newBlocks = clipboard.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
-  let insertIdx = blocks.length;
+  let insertStepIdx = steps.length;
   if (selectedIds.size > 0) {
     const lastSelId = [...selectedIds].pop();
-    const lastSelIdx = blocks.findIndex(b => b.id === lastSelId);
-    if (lastSelIdx >= 0) insertIdx = lastSelIdx + 1;
+    const pos = findStepAndIndex(lastSelId);
+    if (pos) insertStepIdx = pos.stepIdx + 1;
   }
-  blocks.splice(insertIdx, 0, ...newBlocks);
+  const newSteps = newBlocks.map(b => [b]);
+  steps.splice(insertStepIdx, 0, ...newSteps);
   selectedIds.clear();
   newBlocks.forEach(b => selectedIds.add(b.id));
-  renderAllBlocks();
+  renderAllSteps();
   autoSave();
 }
 
 function ctxDuplicate() {
-  const sel = blocks.filter(b => selectedIds.has(b.id));
+  const all = allBlocks();
+  const sel = all.filter(b => selectedIds.has(b.id));
   if (sel.length === 0) return;
   const dupes = sel.map(b => ({ ...JSON.parse(JSON.stringify(b)), id: createBlockId() }));
-  const lastIdx = blocks.findIndex(b => b.id === sel[sel.length - 1].id);
-  blocks.splice(lastIdx + 1, 0, ...dupes);
+  const lastPos = findStepAndIndex(sel[sel.length - 1].id);
+  if (!lastPos) return;
+  const newSteps = dupes.map(b => [b]);
+  steps.splice(lastPos.stepIdx + 1, 0, ...newSteps);
   selectedIds.clear();
   dupes.forEach(b => selectedIds.add(b.id));
-  renderAllBlocks();
+  renderAllSteps();
   autoSave();
 }
 
 function ctxDelete() {
-  blocks = blocks.filter(b => !selectedIds.has(b.id));
+  for (const id of selectedIds) removeBlock(id);
   selectedIds.clear();
-  renderAllBlocks();
+  renderAllSteps();
   autoSave();
 }
 
 function ctxSaveAsMacro() {
-  const sel = blocks.filter(b => selectedIds.has(b.id));
+  const sel = allBlocks().filter(b => selectedIds.has(b.id));
   if (sel.length === 0) return;
   const name = prompt('Macro name:');
   if (!name) return;
@@ -2134,35 +2273,56 @@ function ctxSaveAsMacro() {
 // =========================================================================
 async function runSequence() {
   if (running) return;
-  if (blocks.length === 0) return;
+  const totalBlocks = steps.reduce((s, step) => s + step.length, 0);
+  if (totalBlocks === 0) return;
   running = true;
   stopFlag = false;
   document.getElementById('btn-play').disabled = true;
   document.getElementById('btn-stop').disabled = false;
   setRunStatus('Running...');
 
-  // Clear previous states
   document.querySelectorAll('#canvas-inner .block').forEach(el => {
     el.classList.remove('done', 'error', 'running');
   });
 
-  for (let i = 0; i < blocks.length; i++) {
+  for (let si = 0; si < steps.length; si++) {
     if (stopFlag) break;
-    const b = blocks[i];
-    const bt = BLOCK_TYPES[b.type];
-    if (!bt) continue;
+    const step = steps[si];
+    const els = step.map(b => document.querySelector(`.block[data-id="${b.id}"]`));
+    els.forEach(el => { if (el) { el.classList.add('running'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); } });
 
-    const el = document.querySelector(`.block[data-id="${b.id}"]`);
-    if (el) { el.classList.add('running'); el.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-    setRunStatus(`Running block ${i + 1}/${blocks.length}: ${bt.name}`);
-
-    try {
-      await bt.execute(b.params, 0);
-      if (el) { el.classList.remove('running'); el.classList.add('done'); }
-    } catch (err) {
-      if (el) { el.classList.remove('running'); el.classList.add('error'); }
-      setRunStatus(`Error at block ${i + 1}: ${err.message}`);
-      break;
+    if (step.length === 1) {
+      const b = step[0];
+      const bt = BLOCK_TYPES[b.type];
+      if (!bt) { els[0] && els[0].classList.remove('running'); continue; }
+      setRunStatus(`Step ${si+1}/${steps.length}: ${bt.name}`);
+      try {
+        await bt.execute(b.params, 0);
+        if (els[0]) { els[0].classList.remove('running'); els[0].classList.add('done'); }
+      } catch (err) {
+        if (els[0]) { els[0].classList.remove('running'); els[0].classList.add('error'); }
+        setRunStatus(`Error at step ${si+1}: ${err.message}`);
+        break;
+      }
+    } else {
+      const names = step.map(b => BLOCK_TYPES[b.type]?.name || '?').join(' + ');
+      setRunStatus(`Step ${si+1}/${steps.length}: ${names} (parallel)`);
+      const promises = step.map((b, bi) => {
+        const bt = BLOCK_TYPES[b.type];
+        if (!bt) return Promise.resolve();
+        return bt.execute(b.params, 0).then(() => {
+          if (els[bi]) { els[bi].classList.remove('running'); els[bi].classList.add('done'); }
+        }).catch(err => {
+          if (els[bi]) { els[bi].classList.remove('running'); els[bi].classList.add('error'); }
+          throw err;
+        });
+      });
+      try {
+        await Promise.all(promises);
+      } catch (err) {
+        setRunStatus(`Error at step ${si+1}: ${err.message}`);
+        break;
+      }
     }
   }
 
@@ -2202,7 +2362,7 @@ async function loadMacros() {
     BLOCK_TYPES['macro'].params[0].default = loadedMacros[0].name;
   }
   buildPalette();
-  renderAllBlocks();
+  renderAllSteps();
 }
 
 // =========================================================================
@@ -2210,18 +2370,29 @@ async function loadMacros() {
 // =========================================================================
 function autoSave() {
   try {
-    localStorage.setItem('sequencer_blocks', JSON.stringify(blocks));
+    localStorage.setItem('sequencer_steps', JSON.stringify(steps));
     localStorage.setItem('sequencer_nextId', nextId);
   } catch (e) {}
 }
 
 function autoLoad() {
   try {
-    const saved = localStorage.getItem('sequencer_blocks');
-    if (saved) {
-      blocks = JSON.parse(saved);
+    const savedSteps = localStorage.getItem('sequencer_steps');
+    if (savedSteps) {
+      steps = JSON.parse(savedSteps);
       nextId = parseInt(localStorage.getItem('sequencer_nextId') || '1', 10);
-      for (const b of blocks) { if (b.id >= nextId) nextId = b.id + 1; }
+      for (const step of steps) for (const b of step) { if (b.id >= nextId) nextId = b.id + 1; }
+      return;
+    }
+    // Migrate old flat blocks format
+    const savedBlocks = localStorage.getItem('sequencer_blocks');
+    if (savedBlocks) {
+      const oldBlocks = JSON.parse(savedBlocks);
+      steps = migrateBlocksToSteps(oldBlocks);
+      nextId = parseInt(localStorage.getItem('sequencer_nextId') || '1', 10);
+      for (const step of steps) for (const b of step) { if (b.id >= nextId) nextId = b.id + 1; }
+      localStorage.removeItem('sequencer_blocks');
+      autoSave();
     }
   } catch (e) {}
 }
@@ -2230,11 +2401,13 @@ function autoLoad() {
 async function saveSequence() {
   const name = prompt('Sequence name:');
   if (!name) return;
-  const payload = blocks.map(b => ({ type: b.type, params: { ...b.params } }));
+  const payload = steps.map(step =>
+    step.map(b => ({ type: b.type, params: { ...b.params } }))
+  );
   const r = await fetch('/sequencer/save', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, blocks: payload })
+    body: JSON.stringify({ name, steps: payload })
   });
   const d = await r.json();
   if (d.error) alert('Error: ' + d.error);
@@ -2250,17 +2423,25 @@ async function showLoadDialog() {
   const r2 = await fetch('/sequencer/load?name=' + encodeURIComponent(name));
   const d = await r2.json();
   if (d.error) { alert('Error: ' + d.error); return; }
-  blocks = d.blocks.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }));
+  if (d.steps) {
+    steps = d.steps.map(step =>
+      step.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }))
+    );
+  } else if (d.blocks) {
+    steps = d.blocks.map(b => [{ id: createBlockId(), type: b.type, params: { ...b.params } }]);
+  }
   selectedIds.clear();
-  renderAllBlocks();
+  renderAllSteps();
   autoSave();
   setRunStatus('Loaded: ' + name);
 }
 
 // Export/Import JSON files
 function exportSequence() {
-  const payload = blocks.map(b => ({ type: b.type, params: { ...b.params } }));
-  const blob = new Blob([JSON.stringify({ blocks: payload }, null, 2)], { type: 'application/json' });
+  const payload = steps.map(step =>
+    step.map(b => ({ type: b.type, params: { ...b.params } }))
+  );
+  const blob = new Blob([JSON.stringify({ steps: payload }, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'sequence.json';
@@ -2279,15 +2460,21 @@ function handleImport(event) {
   reader.onload = (e) => {
     try {
       const data = JSON.parse(e.target.result);
-      if (data.blocks && Array.isArray(data.blocks)) {
-        blocks = data.blocks.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }));
-        selectedIds.clear();
-        renderAllBlocks();
-        autoSave();
-        setRunStatus('Imported ' + blocks.length + ' blocks');
+      if (data.steps && Array.isArray(data.steps)) {
+        steps = data.steps.map(step =>
+          step.map(b => ({ id: createBlockId(), type: b.type, params: { ...b.params } }))
+        );
+      } else if (data.blocks && Array.isArray(data.blocks)) {
+        steps = data.blocks.map(b => [{ id: createBlockId(), type: b.type, params: { ...b.params } }]);
       } else {
         alert('Invalid sequence file');
+        return;
       }
+      selectedIds.clear();
+      renderAllSteps();
+      autoSave();
+      const total = steps.reduce((s, step) => s + step.length, 0);
+      setRunStatus('Imported ' + total + ' blocks in ' + steps.length + ' steps');
     } catch (err) {
       alert('Error reading file: ' + err.message);
     }
@@ -2329,7 +2516,7 @@ setInterval(pollStatus, 1000);
 // Pan & Zoom
 // =========================================================================
 let panX = 0, panY = 0, zoom = 1;
-const ZOOM_MIN = 0.25, ZOOM_MAX = 3, ZOOM_STEP = 0.1;
+const ZOOM_MIN = 0.25, ZOOM_MAX = 3, ZOOM_SENSITIVITY = 0.03, ZOOM_BTN_STEP = 0.1;
 let isPanning = false, didPan = false, panStartX = 0, panStartY = 0, panStartPX = 0, panStartPY = 0;
 
 function applyTransform() {
@@ -2361,15 +2548,23 @@ function zoomBy(delta) {
 
   cvs.addEventListener('wheel', (e) => {
     e.preventDefault();
-    const rect = cvs.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const bx = (mx - panX) / zoom;
-    const by = (my - panY) / zoom;
-    if (e.deltaY < 0) zoom = Math.min(ZOOM_MAX, zoom + ZOOM_STEP);
-    else zoom = Math.max(ZOOM_MIN, zoom - ZOOM_STEP);
-    panX = mx - bx * zoom;
-    panY = my - by * zoom;
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom (Ctrl+scroll or trackpad pinch — browsers set ctrlKey for pinch)
+      const rect = cvs.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const bx = (mx - panX) / zoom;
+      const by = (my - panY) / zoom;
+      const nd = e.deltaMode === 0 ? e.deltaY / 100 : e.deltaY;
+      const delta = -nd * ZOOM_SENSITIVITY;
+      zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom + delta));
+      panX = mx - bx * zoom;
+      panY = my - by * zoom;
+    } else {
+      // Pan (regular scroll / two-finger swipe)
+      panX -= e.deltaX;
+      panY -= e.deltaY;
+    }
     applyTransform();
   }, { passive: false });
 
