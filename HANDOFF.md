@@ -13,7 +13,18 @@ Companion documents:
 
 ## 1. Project at a Glance
 
-This repo is the control software for a **tennis-racket-stringing rig**.
+This is an **ongoing project to build an automatic tennis-racket
+stringing machine** — a robot that maps the string holes on a racket,
+threads string through them, tensions, and ties off without manual
+stringing. This repo is the **Raspberry Pi 5 control software** for that
+rig; it is **not feature-complete** — the Block Sequencer and motor
+control are in place, but the end-to-end stringing routine is still
+under active development.
+
+The repo is named `calibration` for historical reasons; it began as the
+hole-mapping and camera-calibration scaffolding and is now growing into
+the full machine controller.
+
 A Raspberry Pi 5 runs a Flask web app that:
 
 - streams an overhead camera with **AprilTag 6-DoF pose overlay**,

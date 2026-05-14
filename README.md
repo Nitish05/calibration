@@ -1,11 +1,19 @@
-# Tennis Racket Calibration Rig
+# Automatic Tennis Racket Stringing Machine
 
-Control software for a Raspberry Pi 5 stringing rig — a Flask web app that
-drives a Grbl CNC, an Arduino-based 6-actuator board, and a USB camera
-with AprilTag pose overlay, plus a visual **Block Sequencer** for
-composing CNC + Arduino macros. Includes standalone tools for camera
-intrinsic calibration, hole-vector measurement, and racket-frame
-segmentation.
+Ongoing project building a robot that strings a tennis racket end-to-end —
+maps the string holes, drives string through them, tensions, and ties off
+— with no manual stringing. This repo is the **Raspberry Pi 5 control
+software** for the rig: a Flask web app that drives a Grbl CNC, an
+Arduino-based 6-actuator board, and a USB camera with AprilTag pose
+overlay, plus a visual **Block Sequencer** for composing the CNC +
+Arduino motion sequences that make up each stringing routine.
+
+The repo name (`calibration`) is historical — it began as the
+hole-mapping and camera-calibration scaffolding that the rest of the
+machine is being built on top of. The supporting CV tools
+(`hole_vector.py`, `segment_racket_v2.py`, `color_mask_tuner.py`) are
+still in here because hole mapping and racket-frame detection remain
+core parts of the machine, not just one-off calibration steps.
 
 > New to this repo? Start with **[`HANDOFF.md`](HANDOFF.md)** — full
 > cold-start guide.
