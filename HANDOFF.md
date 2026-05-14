@@ -104,64 +104,103 @@ touch the board).
 
 ### 2.1 Arduino + CNC-Shield-V3 Wiring
 
-Wiring summary for the six Arduino-side actuators. Pin numbers in the
-**Verified** column come from the standard Protoneer CNC Shield V3
-schematic and the on-shield silk-screen — these are fixed by the PCB,
-not by firmware. Pin numbers in the **Firmware-defined** column are
-chosen in the Arduino sketch (which is not in this repo) and need to be
-confirmed against the running firmware before any hardware change.
+All six actuators are driven by an **Arduino Uno** on a CNC Shield V3.
+The PlatformIO sketch is in this repo at [`firmware/`](firmware/);
+`platformio.ini` is `board = uno` and the sketch itself is
+[`firmware/src/main.cpp`](firmware/src/main.cpp). Library deps
+(`arduino-libraries/Servo`, `waspinator/AccelStepper`) are declared in
+`platformio.ini` and a vendored copy is also committed under
+`firmware/.pio/libdeps/uno/` for offline builds.
 
-#### Stepper slots on the CNC Shield (verified — Protoneer V3 standard)
+Build / flash from the repo root:
 
-The CNC Shield brings out three stepper-driver sockets labelled X / Y / Z
-plus a fourth "A" header you can clone from any of them with jumpers.
-The X and Z sockets each hold one HR4988 (A4988-clone) driver:
+```bash
+cd firmware
+pio run -t upload   # compile + flash to /dev/cnc_aux
+```
 
-| CNC-Shield socket | Carries | STEP | DIR | ENABLE (active-low) | Stepper-motor wires |
+The table below is **verified** against `main.cpp` lines 6-30 — every
+actuator, every pin.
+
+#### NEMA steppers (CNC-Shield V3 X and Z sockets, A4988 drivers)
+
+| Actuator | STEP | DIR | ENABLE (active-low) | Driver | AccelStepper config |
 |---|---|---|---|---|---|
-| **X** | NEMA X-axis stepper | D2 | D5 | D8 (shared) | Coil A → 1A, 1B; Coil B → 2A, 2B (label per the shield silk-screen) |
-| **Z** | NEMA Z-axis stepper (linear vertical) | D4 | D7 | D8 (shared) | Same coil mapping as X, on the Z socket |
-| Y (unused) | — | D3 | D6 | D8 | The Y socket is empty in this build — its pins are free for firmware reuse |
-| A (cloneable) | — | jumper-selectable | jumper-selectable | D8 | The A header is unused; jumpers determine which axis it mirrors |
+| **X stepper** | D2 | D5 | D8 (shared) | A4988 / HR4988 in X socket | `maxSpeed 1000`, `accel 500` |
+| **Z stepper** (linear vertical) | D4 | D7 | D8 (shared) | A4988 / HR4988 in Z socket | `maxSpeed 1000`, `accel 500` |
 
-Common to all stepper drivers:
+`ENABLE_PIN` (D8) is driven LOW in `setup()`, so the drivers are always
+enabled while the Arduino is powered. Microstepping is whatever the
+three MS-jumpers under each socket are set to — record the pattern when
+you set the rig up because the host-side `steps/mm` calibration depends
+on it.
 
-- **Vmot** (motor supply) — 12 V (or whatever the steppers want) on the
-  big green terminal block. Pi 5V/3V3 rails are **not** used for motor
-  power.
-- **Vref pot** — tune per HR4988 datasheet for your motor's rated
-  current. Set this before letting Grbl drive the steppers or they will
-  overheat.
-- Driver microstepping is set by the three MS jumpers under each
-  socket (`MS1/MS2/MS3`). Whatever the firmware assumes for
-  `steps/mm` has to match — record the jumper pattern when you set
-  the rig up.
+The CNC Shield's **Y stepper socket is empty**; the firmware repurposes
+its STEP pin (D3) for the servo signal — see below.
 
-#### Auxiliary motors (firmware-defined — verify before changing)
+#### Servo (CNC-Shield Y_STEP pin, repurposed)
 
-The Arduino sketch defines which extra GPIOs drive these. The CNC Shield
-V3 exposes the unused Y-stepper pins (D3, D6), the four end-stop pins
-(D9, D10, D11, D12), the SpnEn/SpnDir pins (D12, D13), the coolant pin
-(A3), and the four analog pins (A0–A3) as solder pads or screw
-terminals, so any of them is plausible. The table below is a
-**placeholder** to be filled in from the firmware source:
+| Actuator | Signal pin | Library | Notes |
+|---|---|---|---|
+| SG90 grip servo | **D3** (`SERVO_PIN`, the Y_STEP header on the shield) | `Servo.h` | Attached in `setup()`; init position 0°. Range clamped to 0–180° in firmware. |
 
-| Actuator | Driver board | Wires the firmware drives | Likely candidates on the shield | **Confirmed pinout?** |
-|---|---|---|---|---|
-| BYJ1 (28BYJ-48 #1) | ULN2003 module | IN1, IN2, IN3, IN4 | A0, A1, A2, A3 (analog pins broken out near the abort/hold header) | ❓ — needs firmware confirmation |
-| BYJ2 (28BYJ-48 #2) | ULN2003 module | IN1, IN2, IN3, IN4 | D9, D10, D11, D12 (end-stop / spindle headers) | ❓ — needs firmware confirmation |
-| Servo (SG90) | direct PWM, no driver | one signal line (orange/yellow) | D11 or D12 (one of the PWM-capable lines not already claimed by BYJ2) | ❓ — needs firmware confirmation |
-| DC motor (5 V) | L298N, motor A side | IN1, IN2 (direction), ENA (PWM) | D3 + D6 (the free Y-step / Y-dir pins, both PWM-capable) | ❓ — needs firmware confirmation |
+#### 28BYJ-48 steppers (ULN2003 modules, half-step mode)
 
-Power for the BYJ steppers and the SG90 servo is **5 V**, not 12 V — do
-not back-feed them from the CNC-Shield Vmot rail. The L298N has its own
-motor-supply terminal; its logic 5 V can come from the Arduino's 5 V
-pin, but the motor side should have an independent supply.
+| Actuator | IN1 | IN2 | IN3 | IN4 | AccelStepper config |
+|---|---|---|---|---|---|
+| **BYJ1** | A0 | A1 | A2 | A3 | `HALF4WIRE`, `maxSpeed 800`, `accel 400` |
+| **BYJ2** | D11 | D12 | A4 | A5 | `HALF4WIRE`, `maxSpeed 800`, `accel 400` |
 
-**To finalise this table**, read the `#define`s at the top of the
-Arduino sketch (handler functions that the protocol letters dispatch
-to). Until that source is in hand, treat the pin assignments above as
-unverified guesses and do not unplug-and-reconnect on assumption.
+⚠️ The AccelStepper `HALF4WIRE` constructors pass pins in the order
+**`(IN1, IN3, IN2, IN4)`** — i.e. the firmware swaps the middle two.
+This is the coil-energization order, not a wiring change — wire the
+ULN2003 modules in the natural IN1→IN1, IN2→IN2, IN3→IN3, IN4→IN4 order
+and the pin-swap inside `AccelStepper::HALF4WIRE(...)` does the rest.
+
+#### DC motor (L298N motor A side)
+
+| Pin name | Arduino pin | Role |
+|---|---|---|
+| `L298N_IN1` | D9 | Direction A |
+| `L298N_IN2` | D10 | Direction B |
+| `L298N_ENA` | D6 | Speed PWM (`analogWrite`, 0–255 native; firmware constrains the protocol value to 0–100 before writing) |
+
+`F<speed>` drives IN1 HIGH, IN2 LOW; `G<speed>` reverses; `S` sets all
+three pins low (ENA = 0, coast stop).
+
+#### Pin-allocation reference
+
+```
+D2  X_STEP      A0  BYJ1_IN1
+D3  SERVO       A1  BYJ1_IN2
+D4  Z_STEP      A2  BYJ1_IN3
+D5  X_DIR       A3  BYJ1_IN4
+D6  L298N_ENA   A4  BYJ2_IN3
+D7  Z_DIR       A5  BYJ2_IN4
+D8  ENABLE (NEMA drivers, active-low)
+D9  L298N_IN1
+D10 L298N_IN2
+D11 BYJ2_IN1
+D12 BYJ2_IN2
+D13 (unused)
+```
+
+Free pins: D0, D1 (UART — keep clear), D13 (LED only).
+
+#### Power rails
+
+- **Vmot** (12 V terminal block on the CNC Shield) → NEMA X and Z
+  drivers only. Do **not** route this to the Pi or the BYJ / servo /
+  L298N.
+- **5 V** (Arduino's 5 V pin or a separate 5 V supply) → ULN2003
+  modules for both BYJ steppers and the SG90 servo. If both BYJs run at
+  once and dip the rail, give them their own 5 V supply with common
+  ground.
+- **L298N motor supply** — independent 5–12 V terminal on the L298N
+  module; do not back-feed off the Arduino. Logic-Vcc on the L298N can
+  share the Arduino 5 V.
+- All grounds must be tied together (Arduino GND ↔ CNC-Shield GND ↔
+  ULN2003 GND ↔ L298N GND ↔ external-supply GND).
 
 #### Pi 5 → Arduino link
 
