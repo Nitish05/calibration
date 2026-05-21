@@ -1443,11 +1443,6 @@ def recorder_save():
     body = request.get_json(force=True)
     name = body.get("name", "").strip()
     steps = body.get("steps", [])
-    delay_sec = body.get("delaySec", 0)
-    try:
-        delay_sec = max(0.0, float(delay_sec))
-    except (TypeError, ValueError):
-        delay_sec = 0.0
     if not name:
         return jsonify({"error": "Name required"}), 400
     safe = _safe_recording_name(name)
@@ -1455,7 +1450,7 @@ def recorder_save():
         return jsonify({"error": "Invalid name"}), 400
     path = os.path.join("data/recordings", safe + ".json")
     with open(path, "w") as f:
-        json.dump({"name": name, "steps": steps, "delaySec": delay_sec}, f, indent=2)
+        json.dump({"name": name, "steps": steps}, f, indent=2)
     return jsonify({"ok": True})
 
 
@@ -2899,6 +2894,26 @@ RECORDER_HTML = r"""<!DOCTYPE html>
   .record-btn .kbd { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px;
                      font-size: 11px; margin-left: 8px; }
 
+  .delay-btn { background: #1e3a5f; color: #93c5fd; border: 1px solid #1e3a5f;
+               border-radius: 6px; padding: 10px; font-size: 13px; font-weight: 500;
+               cursor: pointer; }
+  .delay-btn:hover { background: #1e40af; color: #fff; }
+
+  .step.delay { background: #0f1e3a; border-color: #1e3a5f; }
+  .step.delay .summary { color: #93c5fd; }
+  .step .delay-edit { display: flex; align-items: center; gap: 6px; font-size: 13px;
+                      color: #cbd5e1; }
+  .step .delay-edit input { background: #0b1121; color: #e2e8f0;
+                            border: 1px solid #334155; border-radius: 4px;
+                            padding: 4px 6px; font-size: 13px; width: 70px;
+                            text-align: right; font-family: 'JetBrains Mono', monospace; }
+  .step .delay-edit .unit { color: #64748b; font-size: 11px; }
+  .step .actions .arrow { background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
+                          padding: 4px 6px; border-radius: 4px; cursor: pointer; font-size: 12px;
+                          line-height: 1; }
+  .step .actions .arrow:hover { background: #334155; }
+  .step .actions .arrow:disabled { opacity: 0.35; cursor: not-allowed; }
+
   /* Jog / motor controls — ported from INDEX_HTML */
   .controls .section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #1e293b;
                              padding-top: 8px; margin-top: 2px; margin-bottom: 6px;
@@ -3018,6 +3033,9 @@ RECORDER_HTML = r"""<!DOCTYPE html>
     <button class="record-btn" id="btn-record" onclick="recordSnapshot()">
       Record Snapshot <span class="kbd">R</span>
     </button>
+    <button class="delay-btn" id="btn-add-delay" onclick="addDelay()">
+      + Add Delay Step
+    </button>
     <div class="status-line" id="record-status">Ready. Press R to record.</div>
 
     <div class="panel controls" id="cnc-controls">
@@ -3092,12 +3110,6 @@ RECORDER_HTML = r"""<!DOCTYPE html>
       <button onclick="loadSelected()">Load</button>
       <button class="danger" onclick="deleteSelected()">Delete</button>
       <span class="sep"></span>
-      <label style="font-size:12px;color:#94a3b8;">Delay</label>
-      <input type="number" id="delay-input" value="0" min="0" step="0.1"
-             style="background:#0b1121;color:#e2e8f0;border:1px solid #1e293b;padding:6px 8px;border-radius:4px;font-size:13px;width:70px;text-align:right;"
-             title="Seconds to wait between steps">
-      <span style="font-size:11px;color:#64748b;">s</span>
-      <span class="sep"></span>
       <button class="primary" id="btn-play" onclick="play()">&#9658; Play</button>
       <button id="btn-step" onclick="stepOnce()">Step</button>
       <button class="warn" id="btn-stop" onclick="stop()" disabled>Stop</button>
@@ -3128,7 +3140,10 @@ function saveLocal() { localStorage.setItem(STORAGE_KEY, JSON.stringify(steps));
 function loadLocal() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) steps = JSON.parse(raw);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      steps = (parsed || []).map(s => s && s.kind ? s : { kind: 'snapshot', ...s });
+    }
   } catch (e) { steps = []; }
 }
 
@@ -3196,6 +3211,7 @@ function recordSnapshot() {
   }
   const snap = liveSnapshot;
   const step = {
+    kind: 'snapshot',
     label: '',
     cnc: snap.cnc ? { x: snap.cnc.x, y: snap.cnc.y, a: snap.cnc.a } : null,
     motors: snap.motors ? { ...snap.motors } : null,
@@ -3209,6 +3225,28 @@ function recordSnapshot() {
   flashStatus('record-status', 'Recorded step #' + steps.length + '.', 'ok');
 }
 
+function addDelay() {
+  steps.push({ kind: 'delay', label: '', seconds: 1.0 });
+  saveLocal();
+  render();
+  flashStatus('record-status', 'Added delay step #' + steps.length + '.', 'ok');
+}
+
+function setDelaySeconds(idx, value) {
+  const v = Math.max(0, parseFloat(value) || 0);
+  steps[idx].seconds = v;
+  saveLocal();
+}
+
+function moveStep(idx, dir) {
+  const target = idx + dir;
+  if (target < 0 || target >= steps.length) return;
+  const [moved] = steps.splice(idx, 1);
+  steps.splice(target, 0, moved);
+  saveLocal();
+  render();
+}
+
 function deleteStep(idx) {
   steps.splice(idx, 1);
   saveLocal();
@@ -3217,8 +3255,10 @@ function deleteStep(idx) {
 
 function overwriteStep(idx) {
   if (!liveSnapshot) return;
+  if (steps[idx].kind === 'delay') return;
   const old = steps[idx];
   steps[idx] = {
+    kind: 'snapshot',
     label: old.label || '',
     cnc: liveSnapshot.cnc ? { ...liveSnapshot.cnc } : null,
     motors: liveSnapshot.motors ? { ...liveSnapshot.motors } : null,
@@ -3264,26 +3304,65 @@ function render() {
   list.innerHTML = '';
   steps.forEach((s, i) => {
     const row = document.createElement('div');
-    row.className = 'step';
+    row.className = 'step' + (s.kind === 'delay' ? ' delay' : '');
     if (i === currentStepIdx) row.classList.add('current');
     row.dataset.idx = i;
-    row.innerHTML =
-      '<span class="idx">#' + (i + 1) + '</span>' +
-      '<span class="handle" title="Drag to reorder">☰</span>' +
-      '<div class="body">' +
-        '<div class="label"><input type="text" placeholder="Step description..." value="' +
-            (s.label || '').replace(/"/g, '&quot;') + '" /></div>' +
-        '<div class="summary">' + summarize(s) + '</div>' +
-      '</div>' +
-      '<div class="actions">' +
-        '<button title="Overwrite with current live state">Re-snap</button>' +
-        '<button class="danger" title="Delete this step">&times;</button>' +
-      '</div>';
-    const inp = row.querySelector('input');
-    inp.addEventListener('input', () => setLabel(i, inp.value));
-    const [btnResnap, btnDel] = row.querySelectorAll('.actions button');
-    btnResnap.addEventListener('click', () => overwriteStep(i));
-    btnDel.addEventListener('click', () => deleteStep(i));
+
+    const upDisabled = i === 0 ? 'disabled' : '';
+    const downDisabled = i === steps.length - 1 ? 'disabled' : '';
+    const arrowBtns =
+      '<button class="arrow" title="Move up" ' + upDisabled + '>&#x25B2;</button>' +
+      '<button class="arrow" title="Move down" ' + downDisabled + '>&#x25BC;</button>';
+
+    if (s.kind === 'delay') {
+      const secsAttr = (typeof s.seconds === 'number' ? s.seconds : 1.0);
+      row.innerHTML =
+        '<span class="idx">#' + (i + 1) + '</span>' +
+        '<span class="handle" title="Drag to reorder">☰</span>' +
+        '<div class="body">' +
+          '<div class="delay-edit">' +
+            '<span>&#9201; Wait</span>' +
+            '<input type="number" min="0" step="0.1" value="' + secsAttr + '">' +
+            '<span class="unit">seconds</span>' +
+          '</div>' +
+          '<div class="summary">Pause playback for ' + secsAttr + 's before the next step.</div>' +
+        '</div>' +
+        '<div class="actions">' +
+          arrowBtns +
+          '<button class="danger" title="Delete this step">&times;</button>' +
+        '</div>';
+      const inp = row.querySelector('.delay-edit input');
+      inp.addEventListener('input', () => {
+        setDelaySeconds(i, inp.value);
+        row.querySelector('.summary').textContent =
+          'Pause playback for ' + (parseFloat(inp.value) || 0) + 's before the next step.';
+      });
+    } else {
+      row.innerHTML =
+        '<span class="idx">#' + (i + 1) + '</span>' +
+        '<span class="handle" title="Drag to reorder">☰</span>' +
+        '<div class="body">' +
+          '<div class="label"><input type="text" placeholder="Step description..." value="' +
+              (s.label || '').replace(/"/g, '&quot;') + '" /></div>' +
+          '<div class="summary">' + summarize(s) + '</div>' +
+        '</div>' +
+        '<div class="actions">' +
+          arrowBtns +
+          '<button title="Overwrite with current live state">Re-snap</button>' +
+          '<button class="danger" title="Delete this step">&times;</button>' +
+        '</div>';
+      const inp = row.querySelector('.label input');
+      inp.addEventListener('input', () => setLabel(i, inp.value));
+      const resnapBtn = row.querySelector('.actions button:not(.arrow):not(.danger)');
+      resnapBtn.addEventListener('click', () => overwriteStep(i));
+    }
+
+    const arrows = row.querySelectorAll('.actions .arrow');
+    arrows[0].addEventListener('click', () => moveStep(i, -1));
+    arrows[1].addEventListener('click', () => moveStep(i, 1));
+    const delBtn = row.querySelector('.actions .danger');
+    delBtn.addEventListener('click', () => deleteStep(i));
+
     list.appendChild(row);
   });
 
@@ -3429,18 +3508,20 @@ async function runFrom(startIdx, onlyOne) {
       if (stopFlag) { flashStatus('play-status', 'Stopped at step ' + (i + 1) + '.', 'error'); break; }
       currentStepIdx = i;
       render();
-      flashStatus('play-status', 'Running step ' + (i + 1) + ' / ' + steps.length + '...', '');
-      await playStep(steps[i]);
-      if (onlyOne) { flashStatus('play-status', 'Stepped to ' + (i + 1) + '.', 'ok'); break; }
-      const delayMs = Math.max(0, parseFloat(document.getElementById('delay-input').value) || 0) * 1000;
-      if (delayMs > 0 && i + 1 < steps.length) {
-        flashStatus('play-status', 'Waiting ' + (delayMs / 1000) + 's before step ' + (i + 2) + '...', '');
+      const s = steps[i];
+      if (s.kind === 'delay') {
+        const delayMs = Math.max(0, parseFloat(s.seconds) || 0) * 1000;
+        flashStatus('play-status', 'Waiting ' + (delayMs / 1000) + 's (step ' + (i + 1) + ' / ' + steps.length + ')...', '');
         const sleepDeadline = Date.now() + delayMs;
         while (Date.now() < sleepDeadline) {
           if (stopFlag) break;
           await new Promise(r => setTimeout(r, Math.min(100, sleepDeadline - Date.now())));
         }
+      } else {
+        flashStatus('play-status', 'Running step ' + (i + 1) + ' / ' + steps.length + '...', '');
+        await playStep(s);
       }
+      if (onlyOne) { flashStatus('play-status', 'Stepped to ' + (i + 1) + '.', 'ok'); break; }
     }
     if (!stopFlag && !onlyOne) {
       flashStatus('play-status', 'Done. ' + steps.length + ' steps complete.', 'ok');
@@ -3480,10 +3561,9 @@ async function stop() {
 async function saveSequence() {
   const name = document.getElementById('name-input').value.trim();
   if (!name) { alert('Enter a name first.'); return; }
-  const delaySec = Math.max(0, parseFloat(document.getElementById('delay-input').value) || 0);
   const r = await fetch('/recorder/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name, steps, delaySec }),
+    body: JSON.stringify({ name, steps }),
   });
   const d = await r.json();
   if (d.error) { alert('Save failed: ' + d.error); return; }
@@ -3513,13 +3593,9 @@ async function loadSelected() {
   const r = await fetch('/recorder/load?name=' + encodeURIComponent(name));
   const d = await r.json();
   if (d.error) { alert('Load failed: ' + d.error); return; }
-  steps = d.steps || [];
+  steps = (d.steps || []).map(s => s.kind ? s : { kind: 'snapshot', ...s });
   currentStepIdx = -1;
   document.getElementById('name-input').value = d.name || name;
-  if (typeof d.delaySec === 'number') {
-    document.getElementById('delay-input').value = d.delaySec;
-    localStorage.setItem('recorder_delay_sec', String(d.delaySec));
-  }
   saveLocal();
   render();
   flashStatus('play-status', 'Loaded "' + name + '" (' + steps.length + ' steps).', 'ok');
@@ -3618,11 +3694,6 @@ document.addEventListener('keydown', (e) => {
 // Init
 // =========================================================================
 loadLocal();
-const savedDelay = localStorage.getItem('recorder_delay_sec');
-if (savedDelay !== null) document.getElementById('delay-input').value = savedDelay;
-document.getElementById('delay-input').addEventListener('change', (e) => {
-  localStorage.setItem('recorder_delay_sec', e.target.value);
-});
 render();
 refreshSavedList();
 </script>
