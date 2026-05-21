@@ -58,47 +58,51 @@ class CNCController:
     # Status
     # ------------------------------------------------------------------
     def query_status(self):
-        """Send ? and parse Grbl status. Returns dict or None."""
+        """Send ? and parse Grbl status. Returns dict or None.
+
+        Holds the serial lock for the whole request/response transaction so
+        it cannot interleave with send_line() on the background poll thread.
+        """
         with self._lock:
             ser = self._serial
-        if ser is None:
-            return None
-        try:
-            ser.write(b"?")
-        except (OSError, Exception):
-            return None
-        deadline = time.time() + 1.0
-        while time.time() < deadline:
-            try:
-                resp = ser.readline().decode("ascii", errors="replace").strip()
-            except (OSError, Exception):
+            if ser is None:
                 return None
-            if resp.startswith("<") and resp.endswith(">"):
-                inner = resp[1:-1]
-                parts = inner.split("|")
-                state = parts[0]
-                wpos = None
-                for p in parts[1:]:
-                    if p.startswith("MPos:"):
-                        c = p[5:].split(",")
-                        if len(c) >= 3:
-                            wpos = {
-                                "x": float(c[0]) - self._wco["x"],
-                                "y": float(c[1]) - self._wco["y"],
-                                "z": float(c[2]) - self._wco["z"],
-                            }
-                    elif p.startswith("WPos:"):
-                        c = p[5:].split(",")
-                        if len(c) >= 3:
-                            wpos = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
-                    elif p.startswith("WCO:"):
-                        c = p[4:].split(",")
-                        if len(c) >= 3:
-                            self._wco = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
-                if wpos is None:
-                    wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
-                return {"state": state, "wpos": wpos}
-        return None
+            try:
+                ser.write(b"?")
+            except Exception:
+                return None
+            deadline = time.time() + 1.0
+            while time.time() < deadline:
+                try:
+                    resp = ser.readline().decode("ascii", errors="replace").strip()
+                except Exception:
+                    return None
+                if resp.startswith("<") and resp.endswith(">"):
+                    inner = resp[1:-1]
+                    parts = inner.split("|")
+                    state = parts[0]
+                    wpos = None
+                    for p in parts[1:]:
+                        if p.startswith("MPos:"):
+                            c = p[5:].split(",")
+                            if len(c) >= 3:
+                                wpos = {
+                                    "x": float(c[0]) - self._wco["x"],
+                                    "y": float(c[1]) - self._wco["y"],
+                                    "z": float(c[2]) - self._wco["z"],
+                                }
+                        elif p.startswith("WPos:"):
+                            c = p[5:].split(",")
+                            if len(c) >= 3:
+                                wpos = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+                        elif p.startswith("WCO:"):
+                            c = p[4:].split(",")
+                            if len(c) >= 3:
+                                self._wco = {"x": float(c[0]), "y": float(c[1]), "z": float(c[2])}
+                    if wpos is None:
+                        wpos = {"x": 0.0, "y": 0.0, "z": 0.0}
+                    return {"state": state, "wpos": wpos}
+            return None
 
     # ------------------------------------------------------------------
     # Jog cancel
@@ -107,33 +111,44 @@ class CNCController:
         """Send realtime jog cancel (0x85) to immediately stop a jog."""
         with self._lock:
             ser = self._serial
-        if ser:
-            ser.write(b"\x85")
+            if ser:
+                ser.write(b"\x85")
 
     # ------------------------------------------------------------------
     # Send G-code
     # ------------------------------------------------------------------
     def send_line(self, line):
-        """Send one G-code line and wait for ok/error response."""
+        """Send one G-code line and wait for ok/error response.
+
+        Holds the serial lock for the whole transaction and gives up after a
+        deadline so a non-responding controller can't hang the caller forever.
+        """
         line = line.strip()
         if not line or line.startswith(";") or line.startswith("("):
             return True
         with self._lock:
             ser = self._serial
-        if ser is None:
-            return "error: not connected"
-        ser.write((line + "\n").encode())
-        while True:
-            resp = ser.readline().decode("ascii", errors="replace").strip()
-            if not resp:
-                continue
-            if resp.startswith("<"):
-                continue
-            if resp == "ok":
-                return True
-            if resp.startswith("error"):
-                return resp
-        return True
+            if ser is None:
+                return "error: not connected"
+            try:
+                ser.write((line + "\n").encode())
+            except Exception as e:
+                return f"error: write failed ({e})"
+            deadline = time.time() + 10.0
+            while time.time() < deadline:
+                try:
+                    resp = ser.readline().decode("ascii", errors="replace").strip()
+                except Exception as e:
+                    return f"error: read failed ({e})"
+                if not resp:
+                    continue
+                if resp.startswith("<"):
+                    continue
+                if resp == "ok":
+                    return True
+                if resp.startswith("error"):
+                    return resp
+            return "error: no response from controller"
 
     # ------------------------------------------------------------------
     # Internal

@@ -264,7 +264,20 @@ def cnc_jog():
     a = float(body.get("a", 0))
     feedrate = int(body.get("feedrate", 1000))
     feedrate = max(100, min(5000, feedrate))
-    cmd = f"$J=G90 G21 X{x} Y{y} Z{a} F{feedrate}"
+    if body.get("relative"):
+        # Incremental jog (G91): only include the axes that actually move.
+        axes = ""
+        if x:
+            axes += f" X{x}"
+        if y:
+            axes += f" Y{y}"
+        if a:
+            axes += f" Z{a}"
+        if not axes:
+            return jsonify({"ok": True})
+        cmd = f"$J=G91 G21{axes} F{feedrate}"
+    else:
+        cmd = f"$J=G90 G21 X{x} Y{y} Z{a} F{feedrate}"
     result = cnc.send_line(cmd)
     if result is True:
         return jsonify({"ok": True})
@@ -477,6 +490,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .status-bar .state { font-weight: bold; }
   .state-idle { color: #4caf50; }
   .state-run { color: #ff9800; }
+  .state-jog { color: #ff9800; }
   .state-alarm { color: #f44336; }
   .tag-ok { color: #4caf50; }
   .tag-none { color: #f44336; }
@@ -536,6 +550,18 @@ INDEX_HTML = r"""<!DOCTYPE html>
   .btn-dc-stop { background: #f44336; color: #fff; }
   .btn-reset { background: #607d8b; color: #fff; font-size: 0.78rem; width: auto; flex: 1; }
 
+  .jog-section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #333;
+                       padding-top: 8px; margin-top: 2px; }
+  .jog-pad { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+  .jog-mid { display: flex; gap: 4px; }
+  .btn-jog { background: #3949ab; color: #fff; width: 46px; height: 38px; padding: 0;
+             font-size: 0.95rem; }
+  .btn-jog:disabled { background: #444; color: #777; cursor: not-allowed; opacity: 0.6; }
+  .btn-jog-stop { background: #f44336; }
+  .motor-row .btn-jog { width: auto; flex: 1; height: auto; padding: 6px 8px;
+                        font-size: 0.8rem; }
+  .jog-unit { font-size: 0.7rem; color: #888; }
+
   .kbd { display: inline-block; background: #333; border: 1px solid #555; border-radius: 4px;
          padding: 1px 7px; font-family: monospace; font-size: 0.75rem; color: #aaa; }
 
@@ -594,6 +620,19 @@ INDEX_HTML = r"""<!DOCTYPE html>
     <button class="btn-export" onclick="exportJSON()">Export</button>
     <button class="btn-import" onclick="document.getElementById('import-file').click()">Import</button>
     <input type="file" id="import-file" accept=".json" onchange="importJSON(this)">
+    <div class="jog-section-label">CNC Jog <span class="kbd">&larr;&uarr;&darr;&rarr;</span></div>
+    <div class="jog-pad">
+      <button class="btn-jog" onclick="cncJog('y',1)" title="Y+">&#x25B2;</button>
+      <div class="jog-mid">
+        <button class="btn-jog" onclick="cncJog('x',-1)" title="X-">&#x25C0;</button>
+        <button class="btn-jog btn-jog-stop" onclick="cncJogCancel()" title="Stop jog">&#x25A0;</button>
+        <button class="btn-jog" onclick="cncJog('x',1)" title="X+">&#x25B6;</button>
+      </div>
+      <button class="btn-jog" onclick="cncJog('y',-1)" title="Y-">&#x25BC;</button>
+    </div>
+    <div class="motor-row"><label>A&deg;</label><button class="btn-jog" onclick="cncJog('a',-1)">&#x21BA; A&minus;</button><button class="btn-jog" onclick="cncJog('a',1)">A&plus; &#x21BB;</button></div>
+    <div class="motor-row"><label>Step</label><input type="number" class="motor-input" id="jog-step" value="10" min="0.1" step="0.1"><span class="jog-unit">mm / &deg;</span></div>
+    <div class="motor-row"><label>Feed</label><input type="number" class="motor-input" id="jog-feed" value="1000" min="100" max="5000" step="100"><span class="jog-unit">mm/min</span></div>
     <div class="arduino-section-label">Arduino Motors <span class="arduino-conn" id="arduino-conn-label">(disconnected)</span></div>
     <div class="motor-row"><label>Z</label><input type="number" class="motor-input" id="steps-z" value="100" min="1"><button class="btn-motor" onclick="moveMotor('z',1)">&#x25B2; Up</button><button class="btn-motor" onclick="moveMotor('z',-1)">&#x25BC; Down</button></div>
     <div class="motor-row"><label>X</label><input type="number" class="motor-input" id="steps-x" value="100" min="1"><button class="btn-motor" onclick="moveMotor('x',1)">&#x2192; Fwd</button><button class="btn-motor" onclick="moveMotor('x',-1)">&#x2190; Back</button></div>
@@ -702,8 +741,9 @@ function pollCNC() {
       `X=${p.x.toFixed(2)} Y=${p.y.toFixed(2)} A(angle)=${p.z.toFixed(2)}\u00B0`;
     const st = document.getElementById('cnc-state');
     st.textContent = s.state;
-    st.className = 'state state-' + s.state.toLowerCase();
+    st.className = 'state state-' + s.state.toLowerCase().replace(/\s+/g, '-');
     document.getElementById('cnc-conn').textContent = s.connected ? 'connected' : 'disconnected';
+    document.querySelectorAll('.btn-jog').forEach(b => b.disabled = !s.connected);
 
     // Tag status
     const tagEl = document.getElementById('tag-status');
@@ -921,11 +961,41 @@ function resetArduino(mode) {
   }).then(r => r.json()).catch(() => {});
 }
 
-// --- Keyboard shortcut ---
+// --- CNC jog controls ---
+function cncJog(axis, dir) {
+  const step = parseFloat(document.getElementById('jog-step').value);
+  if (!isFinite(step) || step <= 0) return;
+  let feed = parseInt(document.getElementById('jog-feed').value, 10);
+  if (!isFinite(feed)) feed = 1000;
+  const body = {relative: true, x: 0, y: 0, a: 0, feedrate: feed};
+  body[axis] = step * dir;
+  fetch('/cnc/jog', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(d => {
+    if (d && d.error) console.warn('Jog error:', d.error);
+  }).catch(() => {});
+}
+function cncJogCancel() {
+  fetch('/cnc/jog/cancel', {method: 'POST'}).catch(() => {});
+}
+
+// --- Keyboard shortcuts ---
+const JOG_KEYS = {
+  ArrowUp: ['y', 1], ArrowDown: ['y', -1],
+  ArrowLeft: ['x', -1], ArrowRight: ['x', 1],
+};
 document.addEventListener('keydown', (e) => {
-  if (e.code === 'Space' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.code === 'Space') {
     e.preventDefault();
     capturePoint();
+  } else if (JOG_KEYS[e.code]) {
+    e.preventDefault();
+    cncJog(JOG_KEYS[e.code][0], JOG_KEYS[e.code][1]);
+  } else if (e.key === 'Escape') {
+    cncJogCancel();
   }
 });
 
@@ -1049,7 +1119,7 @@ function pollCNC() {
     const st = document.getElementById('cnc-state');
     cncState = s.state;
     st.textContent = s.state;
-    st.className = 'state state-' + s.state.toLowerCase();
+    st.className = 'state state-' + s.state.toLowerCase().replace(/\s+/g, '-');
     cncConnected = s.connected;
     document.getElementById('cnc-conn').textContent = s.connected ? 'connected' : 'disconnected';
 

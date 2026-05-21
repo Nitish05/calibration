@@ -5,13 +5,13 @@ project_dir = "."
 calibration_type = "calculate"
 
 [calibration.calculate.intrinsics]
-overwrite_intrinsics = false
+overwrite_intrinsics = true
 show_detection_intrinsics = false
 intrinsics_extension = "mp4"
 extract_every_N_sec = 1
-intrinsics_corners_nb = [8, 5]
+intrinsics_corners_nb = [8, 6]
 # Note: re-calibrate on the Pi - intrinsics differ per camera
-intrinsics_square_size = 9.37
+intrinsics_square_size = 22.4
 fisheye = false
 
 [calibration.calculate.extrinsics]
