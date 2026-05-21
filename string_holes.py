@@ -1443,6 +1443,11 @@ def recorder_save():
     body = request.get_json(force=True)
     name = body.get("name", "").strip()
     steps = body.get("steps", [])
+    delay_sec = body.get("delaySec", 0)
+    try:
+        delay_sec = max(0.0, float(delay_sec))
+    except (TypeError, ValueError):
+        delay_sec = 0.0
     if not name:
         return jsonify({"error": "Name required"}), 400
     safe = _safe_recording_name(name)
@@ -1450,7 +1455,7 @@ def recorder_save():
         return jsonify({"error": "Invalid name"}), 400
     path = os.path.join("data/recordings", safe + ".json")
     with open(path, "w") as f:
-        json.dump({"name": name, "steps": steps}, f, indent=2)
+        json.dump({"name": name, "steps": steps, "delaySec": delay_sec}, f, indent=2)
     return jsonify({"ok": True})
 
 
@@ -3087,6 +3092,12 @@ RECORDER_HTML = r"""<!DOCTYPE html>
       <button onclick="loadSelected()">Load</button>
       <button class="danger" onclick="deleteSelected()">Delete</button>
       <span class="sep"></span>
+      <label style="font-size:12px;color:#94a3b8;">Delay</label>
+      <input type="number" id="delay-input" value="0" min="0" step="0.1"
+             style="background:#0b1121;color:#e2e8f0;border:1px solid #1e293b;padding:6px 8px;border-radius:4px;font-size:13px;width:70px;text-align:right;"
+             title="Seconds to wait between steps">
+      <span style="font-size:11px;color:#64748b;">s</span>
+      <span class="sep"></span>
       <button class="primary" id="btn-play" onclick="play()">&#9658; Play</button>
       <button id="btn-step" onclick="stepOnce()">Step</button>
       <button class="warn" id="btn-stop" onclick="stop()" disabled>Stop</button>
@@ -3421,6 +3432,15 @@ async function runFrom(startIdx, onlyOne) {
       flashStatus('play-status', 'Running step ' + (i + 1) + ' / ' + steps.length + '...', '');
       await playStep(steps[i]);
       if (onlyOne) { flashStatus('play-status', 'Stepped to ' + (i + 1) + '.', 'ok'); break; }
+      const delayMs = Math.max(0, parseFloat(document.getElementById('delay-input').value) || 0) * 1000;
+      if (delayMs > 0 && i + 1 < steps.length) {
+        flashStatus('play-status', 'Waiting ' + (delayMs / 1000) + 's before step ' + (i + 2) + '...', '');
+        const sleepDeadline = Date.now() + delayMs;
+        while (Date.now() < sleepDeadline) {
+          if (stopFlag) break;
+          await new Promise(r => setTimeout(r, Math.min(100, sleepDeadline - Date.now())));
+        }
+      }
     }
     if (!stopFlag && !onlyOne) {
       flashStatus('play-status', 'Done. ' + steps.length + ' steps complete.', 'ok');
@@ -3460,9 +3480,10 @@ async function stop() {
 async function saveSequence() {
   const name = document.getElementById('name-input').value.trim();
   if (!name) { alert('Enter a name first.'); return; }
+  const delaySec = Math.max(0, parseFloat(document.getElementById('delay-input').value) || 0);
   const r = await fetch('/recorder/save', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ name, steps }),
+    body: JSON.stringify({ name, steps, delaySec }),
   });
   const d = await r.json();
   if (d.error) { alert('Save failed: ' + d.error); return; }
@@ -3495,6 +3516,10 @@ async function loadSelected() {
   steps = d.steps || [];
   currentStepIdx = -1;
   document.getElementById('name-input').value = d.name || name;
+  if (typeof d.delaySec === 'number') {
+    document.getElementById('delay-input').value = d.delaySec;
+    localStorage.setItem('recorder_delay_sec', String(d.delaySec));
+  }
   saveLocal();
   render();
   flashStatus('play-status', 'Loaded "' + name + '" (' + steps.length + ' steps).', 'ok');
@@ -3593,6 +3618,11 @@ document.addEventListener('keydown', (e) => {
 // Init
 // =========================================================================
 loadLocal();
+const savedDelay = localStorage.getItem('recorder_delay_sec');
+if (savedDelay !== null) document.getElementById('delay-input').value = savedDelay;
+document.getElementById('delay-input').addEventListener('change', (e) => {
+  localStorage.setItem('recorder_delay_sec', e.target.value);
+});
 render();
 refreshSavedList();
 </script>
