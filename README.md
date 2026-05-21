@@ -5,8 +5,10 @@ maps the string holes, drives string through them, tensions, and ties off
 — with no manual stringing. This repo is the **Raspberry Pi 5 control
 software** for the rig: a Flask web app that drives a Grbl CNC, an
 Arduino-based 6-actuator board, and a USB camera with AprilTag pose
-overlay, plus a visual **Block Sequencer** for composing the CNC +
-Arduino motion sequences that make up each stringing routine.
+overlay. Two automation flows sit on top: a visual **Block Sequencer**
+for composing motion from a fixed palette of CNC + Arduino blocks, and
+a **Sequence Recorder** teach-mode that captures full machine snapshots
+as you jog the rig by hand and replays them in order.
 
 The repo name (`calibration`) is historical — it began as the
 hole-mapping and camera-calibration scaffolding that the rest of the
@@ -36,7 +38,7 @@ the bootstrap commands. Heads-up: the committed venv is **missing
 
 | Script | Port | Purpose |
 |---|---|---|
-| `string_holes.py` | 5001 | **Main app** — capture page, point navigator, block sequencer, motor control, AprilTag feed |
+| `string_holes.py` | 5001 | **Main app** — capture page, point navigator, **sequence recorder**, block sequencer, motor control, AprilTag feed |
 | `hole_vector.py` | 5000 | Dual-perspective hole-vector measurement (spawns `pi_stream.py`) |
 | `detect_apriltag.py` | 8080 | Standalone AprilTag overlay viewer |
 | `record_calibration.py` | 8080 | Record a CameraKit calibration video with live preview |
@@ -59,6 +61,18 @@ Library modules: `cnc.py` (Grbl), `arduino_controller.py` (6 actuators),
 
 Arduino serial protocol: **[`SERIAL_COMMANDS.md`](SERIAL_COMMANDS.md)**.
 
+## Sequence Recorder
+
+Open `http://<host>:5001/recorder`. Jog the CNC and Arduino motors using
+the embedded controls or the arrow keys, then press **R** (or the red
+Record button) to snapshot the full machine state — CNC pose, all four
+steppers, servo angle, and DC motor state. Build up a list, reorder
+with the per-row ↑/↓ buttons, insert `+ Add Delay Step` items for
+timed pauses, then **Save** to `data/recordings/<name>.json` and
+**Play** to replay. Steps round-trip via JSON; the localStorage cache
+preserves work-in-progress across page reloads. Detail:
+[`HANDOFF.md` §9](HANDOFF.md#9-sequence-recorder).
+
 ## Camera Calibration
 
 ```bash
@@ -72,7 +86,7 @@ camerakit report --input Calib_board_outer.toml
 Move the checkerboard slowly across the frame at multiple angles while
 recording. The `Calib_board_outer.toml` file is gitignored — each camera
 must be calibrated locally. See
-[`HANDOFF.md` §10](HANDOFF.md#10-camera-calibration-workflow) for detail.
+[`HANDOFF.md` §11](HANDOFF.md#11-camera-calibration-workflow) for detail.
 
 ## Configuration
 
@@ -93,8 +107,8 @@ CameraKit settings (checkerboard corners, square size) live in
 ## Documentation
 
 - **[HANDOFF.md](HANDOFF.md)** — cold-start guide: hardware, venv, every
-  script, every Flask route, every block type, common gotchas, 5-day
-  onboarding plan.
+  script, every Flask route, every block type, the Sequence Recorder,
+  common gotchas, 5-day onboarding plan.
 - **[SERIAL_COMMANDS.md](SERIAL_COMMANDS.md)** — Arduino serial protocol
   reference.
 

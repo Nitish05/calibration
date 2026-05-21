@@ -440,7 +440,7 @@ python record_calibration.py [--headless] [--port 8080] \
 
 Records a 60-second 1920×1080 MP4 while streaming live preview so you
 can watch your checkerboard coverage. Step 1 of the calibration workflow
-(§10).
+(§11).
 
 ### 6.5 `color_mask_tuner.py` — interactive HSV/LAB tuner (port **8082**)
 
@@ -490,7 +490,7 @@ peek at the Pi CSI camera. Requires `picamera2` (only on the Pi).
 
 ## 7. Main App Tour — `string_holes.py`
 
-The largest single file in the project (2.6 k lines). Layout:
+The largest single file in the project (3.7 k lines). Layout:
 
 | Lines | Section |
 |---|---|
@@ -499,11 +499,15 @@ The largest single file in the project (2.6 k lines). Layout:
 | 86–112 | Shared state (locks, caches), data-dir bootstrap |
 | 116–195 | Camera thread (AprilTag detection + JPEG encoding) |
 | 199–236 | `cnc_poll_thread`, `arduino_poll_thread` (100 ms cadence) |
-| 240–460 | Flask routes (capture / motors / points / import-export) |
-| 462+ | `INDEX_HTML` (capture page) |
-| ~940+ | `NAVIGATOR_HTML` (point navigator) |
-| ~1220+ | Sequencer routes + `SEQUENCER_HTML` |
-| 1620+ | `BLOCK_TYPES` definition (JS object) |
+| 245–504 | Flask routes (capture / motors — incl. `/arduino/move_abs[_all]` / points / import-export) |
+| 511+ | `INDEX_HTML` (capture page) |
+| 1046–1052 | `/navigator` route |
+| 1054+ | `NAVIGATOR_HTML` (point navigator) |
+| 1327–1391 | Sequencer routes (`/sequencer/*`) |
+| 1395–1481 | Recorder routes (`/recorder/*`) |
+| 1492+ | `SEQUENCER_HTML` (block sequencer page) |
+| 1826+ | `BLOCK_TYPES` definition (JS object) |
+| 2849+ | `RECORDER_HTML` (sequence recorder page) |
 | Bottom | `app.run(host="0.0.0.0", port=args.port, threaded=True)` |
 
 ### 7.1 Background threads
@@ -514,42 +518,52 @@ The largest single file in the project (2.6 k lines). Layout:
 - `cnc_poll_thread()` (line 201) — queries Grbl status every 100 ms,
   caches the parsed dict under `cnc_status_lock`.
 - `arduino_poll_thread()` (line 220) — queries `P` (position) on the
-  Arduino every 100 ms, caches under `arduino_status_lock`.
+  Arduino every 100 ms, caches under `arduino_status_lock`. The
+  Sequence Recorder page (§9) consumes this cache via `/recorder/state`
+  rather than adding a second serial poll.
 
 All three are daemonised; they exit when Flask exits.
 
 ### 7.2 Flask route table
 
 Verified by `grep -n "@app.route"` against the source as of commit
-`4384077`.
+`b912cdb`.
 
 | Route | Method | Defined at | Purpose |
 |---|---|---|---|
-| `/` | GET | 244 | Serve capture-tool page |
-| `/cnc/status` | GET | 251 | Cached Grbl status (state, work pos, tag detect) |
-| `/cnc/jog` | POST | 257 | `$J=G90 G21 X.. Y.. Z(=A).. F..` |
-| `/cnc/jog/cancel` | POST | 274 | Real-time jog-cancel byte `0x85` |
-| `/arduino/status` | GET | 282 | Cached `{positions: {x,z,byj1,byj2}}` |
-| `/arduino/move` | POST | 288 | `{motor: x|z|byj1|byj2, steps: N}` |
-| `/arduino/servo` | POST | 304 | `{angle: 0..180}` |
-| `/arduino/dc` | POST | 314 | `{action: forward|reverse|stop, speed: 0..100}` |
-| `/arduino/reset` | POST | 330 | `{mode: all|steppers}` |
-| `/feed` | GET | 343 | MJPEG `multipart/x-mixed-replace` of annotated frames |
-| `/world_coord` | POST | 361 | `{u, v}` pixel → `{x_mm, y_mm}` world XY via current pose |
-| `/capture` | POST | 376 | Record current CNC pos as a hole (`type: inside|outside`) |
-| `/points` | GET | 400 | Return all captured points |
-| `/points` | DELETE | 405 | Clear all points |
-| `/points/last` | DELETE | 411 | Undo last point |
-| `/points/<idx>` | DELETE | 419 | Delete by index |
-| `/export` | GET | 427 | Download points as `string_holes_<ts>.json` |
-| `/import` | POST | 437 | Upload a points array (back-compat: accepts `a` or `z` key) |
-| `/navigator` | GET | 939 | Serve point-navigator page |
-| `/sequencer` | GET | 1219 | Serve block-sequencer page |
-| `/sequencer/save` | POST | 1224 | Save sequence to `data/sequences/<name>.json` |
-| `/sequencer/list` | GET | 1240 | List saved sequence names |
-| `/sequencer/load` | GET | 1249 | Load sequence by name (query param `name`) |
-| `/sequencer/macros/save` | POST | 1260 | Save macro to `data/macros/<name>.json` |
-| `/sequencer/macros` | GET | 1274 | List saved macros (with block contents) |
+| `/` | GET | 245 | Serve capture-tool page |
+| `/cnc/status` | GET | 252 | Cached Grbl status (state, work pos, tag detect) |
+| `/cnc/jog` | POST | 258 | `$J=G90 G21 X.. Y.. Z(=A).. F..` |
+| `/cnc/jog/cancel` | POST | 288 | Real-time jog-cancel byte `0x85` |
+| `/arduino/status` | GET | 296 | Cached `{positions: {x,z,byj1,byj2}}` |
+| `/arduino/move` | POST | 302 | `{motor: x|z|byj1|byj2, steps: N}` (relative) |
+| `/arduino/move_abs` | POST | 318 | `{motor, target}` → atomic delta move under one lock |
+| `/arduino/move_abs_all` | POST | 333 | `{x,z,byj1,byj2}` → one P query + batched moves under one lock (used by Recorder playback) |
+| `/arduino/servo` | POST | 353 | `{angle: 0..180}` |
+| `/arduino/dc` | POST | 363 | `{action: forward|reverse|stop, speed: 0..100}` |
+| `/arduino/reset` | POST | 379 | `{mode: all|steppers}` |
+| `/feed` | GET | 392 | MJPEG `multipart/x-mixed-replace` of annotated frames |
+| `/world_coord` | POST | 410 | `{u, v}` pixel → `{x_mm, y_mm}` world XY via current pose |
+| `/capture` | POST | 425 | Record current CNC pos as a hole (`type: inside|outside`) |
+| `/points` | GET | 449 | Return all captured points |
+| `/points` | DELETE | 454 | Clear all points |
+| `/points/last` | DELETE | 460 | Undo last point |
+| `/points/<idx>` | DELETE | 468 | Delete by index |
+| `/export` | GET | 476 | Download points as `string_holes_<ts>.json` |
+| `/import` | POST | 486 | Upload a points array (back-compat: accepts `a` or `z` key) |
+| `/navigator` | GET | 1046 | Serve point-navigator page |
+| `/sequencer` | GET | 1327 | Serve block-sequencer page |
+| `/sequencer/save` | POST | 1332 | Save sequence to `data/sequences/<name>.json` |
+| `/sequencer/list` | GET | 1348 | List saved sequence names |
+| `/sequencer/load` | GET | 1357 | Load sequence by name (query param `name`) |
+| `/sequencer/macros/save` | POST | 1368 | Save macro to `data/macros/<name>.json` |
+| `/sequencer/macros` | GET | 1382 | List saved macros (with block contents) |
+| `/recorder` | GET | 1395 | Serve Sequence Recorder page (§9) |
+| `/recorder/state` | GET | 1400 | Current full machine snapshot (cnc/motors/servo/dc + connection flags) |
+| `/recorder/save` | POST | 1441 | `{name, steps}` → `data/recordings/<name>.json` |
+| `/recorder/list` | GET | 1457 | List saved recordings |
+| `/recorder/load` | GET | 1466 | Load recording by `?name=` |
+| `/recorder/delete` | POST | 1477 | `{name}` → remove the saved file |
 
 ---
 
@@ -614,7 +628,131 @@ are not committed.
 
 ---
 
-## 9. Coordinate System & Camera Math
+## 9. Sequence Recorder
+
+Teach-mode counterpart to the Block Sequencer. Where §8 composes
+motion from a fixed block palette, the Recorder *learns* motion by
+watching you drive the rig: jog manually, hit **R**, jog more, hit
+**R** again, save, replay. Page lives at `/recorder` and is linked
+from the nav bar of every other page.
+
+### 9.1 Concept
+
+Each press of the red **Record Snapshot** button (or `R`) captures
+the *entire* current machine state in one go — CNC `(x, y, a)`, the
+four Arduino stepper absolute positions, the current servo angle,
+and the current DC motor state. Playback walks the recorded list in
+order, commanding every actuator to its recorded target before
+advancing to the next step. There is no per-step "what changed"
+calculation: each snapshot is an absolute target.
+
+`+ Add Delay Step` inserts a pure-pause item between snapshots. The
+two row kinds — `snapshot` and `delay` — coexist in the same `steps[]`
+array (see §9.2).
+
+### 9.2 Step shape
+
+`steps[]` in the page-local JS, persisted under
+`localStorage.recorder_steps_v1` and `data/recordings/<name>.json`:
+
+```json
+{
+  "kind": "snapshot",
+  "label": "optional human description",
+  "cnc":    {"x": 12.3, "y": 45.6, "a": 90.0},
+  "motors": {"x": 200,  "z": -150, "byj1": 0, "byj2": 0},
+  "servo":  75,
+  "dc":     {"action": "stop", "speed": 0},
+  "timestamp": "2026-05-21T14:32:11"
+}
+
+{
+  "kind": "delay",
+  "label": "",
+  "seconds": 1.5
+}
+```
+
+`servo` is `null` until the servo has been commanded at least once
+(the firmware doesn't report its angle through `P`); the host tracks
+it in `ArduinoController.current_servo_angle`. Same idea for `dc`.
+
+Legacy step records saved before commit `b912cdb` have no `kind`
+field — they are auto-migrated to `'snapshot'` on load (see
+`loadLocal()` and `loadSelected()` in `RECORDER_HTML`).
+
+### 9.3 Execution semantics
+
+`runFrom(startIdx, onlyOne)` in `RECORDER_HTML` iterates `steps[]`
+sequentially. Per step:
+
+- `kind === 'snapshot'` → fire CNC and Arduino moves in parallel
+  (different serial ports / locks), then await both to settle:
+  - CNC: one `POST /cnc/jog` absolute move, then poll `/cnc/status`
+    until `state === 'Idle'`.
+  - Arduino: one `POST /arduino/move_abs_all` carrying all four
+    motor targets. Server-side `ArduinoController.move_all_to_abs`
+    holds `_lock` across a single `P` query + up to four ordered
+    motor writes (skipping zero-deltas), then the page polls
+    `/arduino/status` until each motor's cached step count is stable
+    for 3 reads at 300 ms (≈ 900 ms settle).
+  - Servo / DC: fire-and-forget `POST /arduino/servo` /
+    `/arduino/dc` when the snapshot records them.
+- `kind === 'delay'` → interruptible sleep. Polls `stopFlag` every
+  100 ms so **Stop** still aborts mid-wait.
+
+The Step button reuses the same code with `onlyOne = true`, so it
+advances exactly one step regardless of kind.
+
+**Why batched, not parallel four-up.** The first version of playback
+sent four parallel `POST /arduino/move_abs` requests from `Promise.all`.
+Each handler did two non-atomic serial transactions (`P` then a move),
+and the 100 ms `arduino_poll_thread` also runs `P`. With four threads
+racing on a 1:1 line-based protocol, response lines got read by the
+wrong waiter — a `BYJ1 MOVE …` echo would be parsed as a position
+report, find no `:` separator, and surface as `Error: z: Could not
+read current position`. Commit `f414c09` fixed this by adding
+`move_all_to_abs` and `_send_inline(ser, cmd)` (drains stale RX
+before every write); the four motor moves now happen sequentially
+under one lock acquisition.
+
+### 9.4 ArduinoController additions
+
+The recorder relies on three additions to `arduino_controller.py`:
+
+| Member | Purpose |
+|---|---|
+| `current_servo_angle` | Last commanded servo angle (firmware doesn't report it). `None` until first `set_servo`. |
+| `current_dc_state` | Last commanded DC state (`{action, speed}`). |
+| `move_to_abs(motor, target)` | Atomic single-motor absolute move. Holds `_lock` across both the `P` query and the relative move write. |
+| `move_all_to_abs(targets)` | Atomic batched absolute move. One `_lock`, one `P`, then sequential moves for every non-zero delta. |
+| `_send_inline(ser, cmd)` | Private. Drains RX, writes, reads one line. Caller must hold `_lock`. Every public command path uses this. |
+
+### 9.5 Persistence
+
+| Where | What |
+|---|---|
+| `localStorage.recorder_steps_v1` | Current step list (auto-saved on every edit) |
+| `data/recordings/<name>.json` | Server-side saved sequences (`{name, steps}`) |
+
+`data/recordings/` is auto-created at startup (line 90) alongside the
+sequencer / macros dirs.
+
+### 9.6 Keyboard
+
+| Key | Action |
+|---|---|
+| `R` | Record snapshot |
+| Arrow keys | Jog CNC X/Y by the current `Step` value |
+| `Esc` | Cancel current CNC jog |
+
+All ignored when an `INPUT` / `TEXTAREA` is focused, or while
+playback is running. No `Space` binding here — that's reserved for
+the Capture page's point-capture shortcut.
+
+---
+
+## 10. Coordinate System & Camera Math
 
 `transforms.py` is the single source of truth for camera-to-world
 geometry. Pipeline:
@@ -629,7 +767,7 @@ geometry. Pipeline:
 `pixels_to_world(contour, R, t)` and `world_to_pixels(world, R, t)` are
 each ~30 lines of vectorised numpy.
 
-### 9.1 Hardcoded intrinsics
+### 10.1 Hardcoded intrinsics
 
 `transforms.py:12-18`:
 
@@ -653,7 +791,7 @@ expecting it to match the live code.
 
 ---
 
-## 10. Camera Calibration Workflow
+## 11. Camera Calibration Workflow
 
 For a fresh camera (e.g. you swapped lenses or moved to a different
 unit):
@@ -681,7 +819,7 @@ After step 4, restart any running app to pick up the new values.
 
 ---
 
-## 11. Data Files & Persistence
+## 12. Data Files & Persistence
 
 | Location | Lifetime | Contents |
 |---|---|---|
@@ -690,7 +828,9 @@ After step 4, restart any running app to pick up the new values.
 | `/import` upload | Manual | Restore points from a previous export. |
 | `data/sequences/*.json` | Persistent | Saved Block Sequencer workflows. |
 | `data/macros/*.json` | Persistent | Saved macros (reusable block groups). |
+| `data/recordings/*.json` | Persistent | Saved Sequence Recorder teach-mode sequences (snapshots + delay steps). |
 | `localStorage.sequencer_steps` | Browser-local | Auto-saved sequencer canvas. |
+| `localStorage.recorder_steps_v1` | Browser-local | Auto-saved Sequence Recorder step list. |
 | `intrinsics/cam_00/*.mp4` | Persistent (gitignored) | Calibration recordings. |
 | `calibration/` (gitignored) | Persistent | CameraKit working dir. |
 | `Calib_board_outer.toml` | Local (gitignored) | CameraKit output, must be regenerated per camera. |
@@ -699,7 +839,7 @@ There is no database. Nothing in `data/` is committed.
 
 ---
 
-## 12. Common Gotchas
+## 13. Common Gotchas
 
 - **"Arduino Connection failed: No module named 'serial'."**
   `pyserial` is not in the dev venv. `uv pip install pyserial`. See §5.3.
@@ -713,7 +853,7 @@ There is no database. Nothing in `data/` is committed.
 - **Grbl Z is rotation.** When you read jog code that says
   `$J=G90 G21 X10 Y20 Z45 F1000`, the `Z45` is 45° rotation, not
   45 mm vertical motion. Linear vertical is the **Arduino** Z stepper.
-- **Calibration TOML doesn't match the code.** See §9.1. Trust
+- **Calibration TOML doesn't match the code.** See §10.1. Trust
   `transforms.py`, not `Calib_board_outer.toml`, unless you've just
   re-run calibration.
 - **Block Sequencer canvas vanished after a refresh.** It's auto-saved
@@ -724,10 +864,25 @@ There is no database. Nothing in `data/` is committed.
 - **`Calib_board_outer.toml` gitignored.** Fresh clones won't have it;
   that's intentional — re-run `camerakit calibrate` on the target
   hardware.
+- **CNC dashboard occasionally flips to "No response" and jogs stall
+  ~2 s.** Known race in `cnc.py`: the outer `query_status` deadline is
+  1 s but the underlying `ser.readline()` blocks up to the full 2 s
+  serial timeout if a `?` reply gets dropped; while it's stuck the
+  poll thread holds the CNC lock, so any concurrent jog waits.
+  Diagnosed 2026-05-21, fix deferred. Recovery: usually clears within
+  one or two poll cycles. To fix when picked up, shorten `ser.timeout`
+  to ~50 ms for the duration of the read loop and drain RX on a `None`
+  return (same pattern that fixed the equivalent Arduino race in
+  `f414c09`).
+- **Recorder shows `servo: unset` and skips servo on playback.**
+  Expected for any snapshot taken before the servo has been commanded
+  this session. The Arduino firmware doesn't expose servo angle via
+  `P`, so the host can only know it after a `set_servo` call. Move
+  the servo once from the side panel and re-snapshot.
 
 ---
 
-## 13. Day-by-Day Onboarding Plan
+## 14. Day-by-Day Onboarding Plan
 
 **Day 1 — Environment.**
 
@@ -751,7 +906,7 @@ There is no database. Nothing in `data/` is committed.
 - Bring up the camera with `python detect_apriltag.py --headless`.
 - Open `http://<host>:8080`, point at a tag, verify the XYZ readout
   changes when you move the tag.
-- Optional: re-calibrate (§10) if your camera/lens isn't what was used
+- Optional: re-calibrate (§11) if your camera/lens isn't what was used
   for the values in `transforms.py`.
 
 **Day 4 — Main app.**
@@ -763,6 +918,10 @@ There is no database. Nothing in `data/` is committed.
   points (you need a tag in view).
 - Navigate to `/sequencer`. Drag a `CNC GoTo`, an `Arduino Move`, and a
   `Wait` onto the canvas. Click ▶ Play.
+- Navigate to `/recorder`. Jog the rig with the side panel and arrow
+  keys, press **R** a few times to record snapshots, drop an `+ Add
+  Delay Step` between two of them, save as `test1`, hit ▶ Play. Watch
+  the machine return to each recorded pose in order.
 
 **Day 5 — Code deep-dive.** Read in this order:
 
@@ -775,7 +934,7 @@ There is no database. Nothing in `data/` is committed.
 
 ---
 
-## 14. Pointers
+## 15. Pointers
 
 - [`README.md`](README.md) — short version of this.
 - [`SERIAL_COMMANDS.md`](SERIAL_COMMANDS.md) — Arduino protocol.
@@ -783,10 +942,12 @@ There is no database. Nothing in `data/` is committed.
   the `camerakit` CLI.
 - [Grbl wiki](https://github.com/gnea/grbl/wiki) — `$J`, `$102`,
   real-time commands, status report format.
-- **Arduino firmware** — not in this repo. Currently lives only on the
-  board. Tracking the source down is an open task before any firmware
-  changes.
+- **Arduino firmware** — vendored at [`firmware/`](firmware/) (PlatformIO
+  project, board `uno`). Command parser + actuator setup is in
+  [`firmware/src/main.cpp`](firmware/src/main.cpp); strict 1:1
+  line-protocol with no async output. See `SERIAL_COMMANDS.md` for the
+  host-facing reference.
 
 ---
 
-*Last verified against repo state at commit `4384077` on 2026-05-14.*
+*Last verified against repo state at commit `b912cdb` on 2026-05-21.*
