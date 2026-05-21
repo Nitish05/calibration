@@ -2853,7 +2853,7 @@ RECORDER_HTML = r"""<!DOCTYPE html>
   .conn-pill.ok { background: #064e3b; color: #6ee7b7; }
   .conn-pill.bad { background: #4c1d24; color: #fca5a5; }
 
-  main { display: grid; grid-template-columns: 380px 1fr; gap: 0; flex: 1; min-height: 0; }
+  main { display: grid; grid-template-columns: 460px 1fr; gap: 0; flex: 1; min-height: 0; }
 
   aside.live { background: #0f172a; border-right: 1px solid #1e293b; padding: 16px;
                overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
@@ -2873,6 +2873,39 @@ RECORDER_HTML = r"""<!DOCTYPE html>
   .record-btn:disabled { background: #334155; box-shadow: none; cursor: not-allowed; }
   .record-btn .kbd { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px;
                      font-size: 11px; margin-left: 8px; }
+
+  /* Jog / motor controls — ported from INDEX_HTML */
+  .controls .section-label { font-size: 0.8rem; color: #888; border-top: 1px solid #1e293b;
+                             padding-top: 8px; margin-top: 2px; margin-bottom: 6px;
+                             display: flex; align-items: center; gap: 6px; }
+  .controls .section-label .kbd { display: inline-block; background: #1e293b; border: 1px solid #334155;
+                                  border-radius: 4px; padding: 1px 6px; font-family: monospace;
+                                  font-size: 0.7rem; color: #94a3b8; }
+  .controls.disabled { opacity: 0.45; pointer-events: none; }
+  .motor-row { display: flex; align-items: center; gap: 4px; margin-bottom: 4px; }
+  .motor-row label { font-size: 0.78rem; min-width: 42px; color: #cbd5e1; }
+  .motor-input { width: 64px; padding: 5px 4px; border: 1px solid #334155; border-radius: 4px;
+                 background: #0b1121; color: #e2e8f0; font-size: 0.82rem; text-align: center; }
+  .motor-input:disabled { opacity: 0.4; }
+  .btn-motor { background: #009688; color: #fff; padding: 6px 8px; font-size: 0.78rem;
+               border: none; border-radius: 4px; cursor: pointer;
+               width: auto; min-width: 0; flex: 1; font-weight: 500; }
+  .btn-motor:hover { filter: brightness(1.1); }
+  .btn-motor:disabled { background: #334155; color: #64748b; cursor: not-allowed; opacity: 0.6; }
+  .btn-dc-fwd { background: #4caf50; color: #fff; }
+  .btn-dc-rev { background: #ff9800; color: #fff; }
+  .btn-dc-stop { background: #f44336; color: #fff; }
+  .btn-reset { background: #607d8b; color: #fff; font-size: 0.78rem; width: auto; flex: 1; }
+  .jog-pad { display: flex; flex-direction: column; align-items: center; gap: 6px; margin: 4px 0; }
+  .jog-mid { display: flex; gap: 6px; }
+  .btn-jog { background: #3949ab; color: #fff; width: 50px; height: 40px; padding: 0;
+             border: none; border-radius: 4px; cursor: pointer; font-size: 0.95rem; font-weight: 500; }
+  .btn-jog:hover { filter: brightness(1.15); }
+  .btn-jog:disabled { background: #334155; color: #64748b; cursor: not-allowed; opacity: 0.6; }
+  .btn-jog-stop { background: #f44336; }
+  .motor-row .btn-jog { width: auto; flex: 1; height: auto; padding: 6px 8px;
+                        font-size: 0.8rem; }
+  .jog-unit { font-size: 0.7rem; color: #64748b; }
 
   section.steps { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
   .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
@@ -2961,6 +2994,69 @@ RECORDER_HTML = r"""<!DOCTYPE html>
       Record Snapshot <span class="kbd">R</span>
     </button>
     <div class="status-line" id="record-status">Ready. Press R to record.</div>
+
+    <div class="panel controls" id="cnc-controls">
+      <div class="section-label">CNC Jog <span class="kbd">&larr; &uarr; &darr; &rarr;</span></div>
+      <div class="jog-pad">
+        <button class="btn-jog" onclick="cncJog('y',1)" title="Y+">&#x25B2;</button>
+        <div class="jog-mid">
+          <button class="btn-jog" onclick="cncJog('x',-1)" title="X-">&#x25C0;</button>
+          <button class="btn-jog btn-jog-stop" onclick="cncJogCancel()" title="Stop jog (Esc)">&#x25A0;</button>
+          <button class="btn-jog" onclick="cncJog('x',1)" title="X+">&#x25B6;</button>
+        </div>
+        <button class="btn-jog" onclick="cncJog('y',-1)" title="Y-">&#x25BC;</button>
+      </div>
+      <div class="motor-row"><label>A&deg;</label>
+        <button class="btn-jog" onclick="cncJog('a',-1)">&#x21BA; A&minus;</button>
+        <button class="btn-jog" onclick="cncJog('a',1)">A&plus; &#x21BB;</button>
+      </div>
+      <div class="motor-row"><label>Step</label>
+        <input type="number" class="motor-input" id="jog-step" value="10" min="0.1" step="0.1">
+        <span class="jog-unit">mm/&deg;</span>
+      </div>
+      <div class="motor-row"><label>Feed</label>
+        <input type="number" class="motor-input" id="jog-feed" value="1000" min="100" max="5000" step="100">
+        <span class="jog-unit">mm/min</span>
+      </div>
+    </div>
+
+    <div class="panel controls" id="arduino-controls">
+      <div class="section-label">Arduino Motors</div>
+      <div class="motor-row"><label>Z</label>
+        <input type="number" class="motor-input" id="steps-z" value="100" min="1">
+        <button class="btn-motor" onclick="moveMotor('z',1)">&#x25B2; Up</button>
+        <button class="btn-motor" onclick="moveMotor('z',-1)">&#x25BC; Down</button>
+      </div>
+      <div class="motor-row"><label>X</label>
+        <input type="number" class="motor-input" id="steps-x" value="100" min="1">
+        <button class="btn-motor" onclick="moveMotor('x',1)">&#x2192; Fwd</button>
+        <button class="btn-motor" onclick="moveMotor('x',-1)">&#x2190; Back</button>
+      </div>
+      <div class="motor-row"><label>BYJ1</label>
+        <input type="number" class="motor-input" id="steps-byj1" value="100" min="1">
+        <button class="btn-motor" onclick="moveMotor('byj1',1)">CW</button>
+        <button class="btn-motor" onclick="moveMotor('byj1',-1)">CCW</button>
+      </div>
+      <div class="motor-row"><label>BYJ2</label>
+        <input type="number" class="motor-input" id="steps-byj2" value="100" min="1">
+        <button class="btn-motor" onclick="moveMotor('byj2',1)">CW</button>
+        <button class="btn-motor" onclick="moveMotor('byj2',-1)">CCW</button>
+      </div>
+      <div class="motor-row"><label>Servo</label>
+        <input type="number" class="motor-input" id="servo-angle" value="90" min="0" max="180">
+        <button class="btn-motor" onclick="sendServo()">Set</button>
+      </div>
+      <div class="motor-row"><label>DC</label>
+        <input type="number" class="motor-input" id="dc-speed" value="50" min="0" max="100">
+        <button class="btn-motor btn-dc-fwd" onclick="dcControl('forward')">Fwd</button>
+        <button class="btn-motor btn-dc-rev" onclick="dcControl('reverse')">Rev</button>
+        <button class="btn-motor btn-dc-stop" onclick="dcControl('stop')">Stop</button>
+      </div>
+      <div class="motor-row">
+        <button class="btn-reset btn-motor" onclick="resetArduino('steppers')">Reset Steppers</button>
+        <button class="btn-reset btn-motor" onclick="resetArduino('all')">Reset All</button>
+      </div>
+    </div>
   </aside>
 
   <section class="steps">
@@ -3025,6 +3121,8 @@ function renderLive(d) {
   const ardPill = document.getElementById('ard-pill');
   ardPill.textContent = 'Arduino ' + (d.arduino_connected ? 'connected' : 'offline');
   ardPill.className = 'conn-pill ' + (d.arduino_connected ? 'ok' : 'bad');
+  document.getElementById('cnc-controls').classList.toggle('disabled', !d.cnc_connected);
+  document.getElementById('arduino-controls').classList.toggle('disabled', !d.arduino_connected);
 
   if (d.cnc) {
     document.getElementById('live-x').textContent = d.cnc.x.toFixed(3);
@@ -3388,12 +3486,78 @@ async function deleteSelected() {
 }
 
 // =========================================================================
+// Jog / Arduino controls (mirrors the main capture page)
+// =========================================================================
+function cncJog(axis, dir) {
+  const step = parseFloat(document.getElementById('jog-step').value);
+  if (!isFinite(step) || step <= 0) return;
+  let feed = parseInt(document.getElementById('jog-feed').value, 10);
+  if (!isFinite(feed)) feed = 1000;
+  const body = { relative: true, x: 0, y: 0, a: 0, feedrate: feed };
+  body[axis] = step * dir;
+  fetch('/cnc/jog', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(d => {
+    if (d && d.error) console.warn('Jog error:', d.error);
+  }).catch(() => {});
+}
+
+function cncJogCancel() {
+  fetch('/cnc/jog/cancel', { method: 'POST' }).catch(() => {});
+}
+
+function moveMotor(motor, direction) {
+  const input = document.getElementById('steps-' + motor);
+  const steps = parseInt(input.value, 10) * direction;
+  fetch('/arduino/move', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ motor, steps }),
+  }).then(r => r.json()).catch(() => {});
+}
+
+function sendServo() {
+  const angle = parseInt(document.getElementById('servo-angle').value, 10);
+  fetch('/arduino/servo', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ angle }),
+  }).then(r => r.json()).catch(() => {});
+}
+
+function dcControl(action) {
+  const speed = parseInt(document.getElementById('dc-speed').value, 10);
+  fetch('/arduino/dc', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, speed }),
+  }).then(r => r.json()).catch(() => {});
+}
+
+function resetArduino(mode) {
+  fetch('/arduino/reset', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode }),
+  }).then(r => r.json()).catch(() => {});
+}
+
+// =========================================================================
 // Keyboard
 // =========================================================================
+const JOG_KEYS = {
+  ArrowUp: ['y', 1], ArrowDown: ['y', -1],
+  ArrowLeft: ['x', -1], ArrowRight: ['x', 1],
+};
 document.addEventListener('keydown', (e) => {
-  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  if (playing) return;  // don't jog or record while sequence is playing
   if (e.key === 'r' || e.key === 'R') {
-    if (!playing) { e.preventDefault(); recordSnapshot(); }
+    e.preventDefault();
+    recordSnapshot();
+  } else if (JOG_KEYS[e.code]) {
+    e.preventDefault();
+    cncJog(JOG_KEYS[e.code][0], JOG_KEYS[e.code][1]);
+  } else if (e.key === 'Escape') {
+    cncJogCancel();
   }
 });
 
