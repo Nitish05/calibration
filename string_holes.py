@@ -87,6 +87,7 @@ atexit.register(arduino.disconnect)
 # ---------------------------------------------------------------------------
 os.makedirs("data/sequences", exist_ok=True)
 os.makedirs("data/macros", exist_ok=True)
+os.makedirs("data/recordings", exist_ok=True)
 
 # ---------------------------------------------------------------------------
 # State
@@ -311,6 +312,21 @@ def arduino_move():
     if fn is None:
         return jsonify({"error": f"Unknown motor: {motor}"}), 400
     resp = fn(steps)
+    return jsonify({"ok": True, "response": resp})
+
+
+@app.route("/arduino/move_abs", methods=["POST"])
+def arduino_move_abs():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
+    body = request.get_json(force=True)
+    motor = body.get("motor")
+    target = int(body.get("target", 0))
+    if motor not in ("x", "z", "byj1", "byj2"):
+        return jsonify({"error": f"Unknown motor: {motor}"}), 400
+    resp = arduino.move_to_abs(motor, target)
+    if resp is None:
+        return jsonify({"error": "Could not read current position"}), 500
     return jsonify({"ok": True, "response": resp})
 
 
@@ -594,7 +610,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <span class="pos" id="arduino-pos">X:-- Z:-- B1:-- B2:--</span>
   <span class="state" id="cnc-state">--</span>
   <span style="color:#666" id="cnc-conn">disconnected</span>
-  <a href="/sequencer" style="margin-left:auto; color:#ce93d8; text-decoration:none; font-weight:600;">Block Sequencer</a>
+  <a href="/recorder" style="margin-left:auto; color:#fca5a5; text-decoration:none; font-weight:600;">Recorder</a>
+  <a href="/sequencer" style="color:#ce93d8; text-decoration:none; font-weight:600;">Block Sequencer</a>
   <a href="/navigator" style="color:#8ab4f8; text-decoration:none; font-weight:600;">Point Navigator &rarr;</a>
   <span id="tag-status"></span>
 </div>
@@ -1081,6 +1098,7 @@ NAVIGATOR_HTML = r"""<!DOCTYPE html>
 
 <div class="nav-bar">
   <a href="/">&larr; Back to Capture</a>
+  <a href="/recorder">Recorder</a>
   <a href="/sequencer">Block Sequencer</a>
   <button class="btn-cancel" id="btn-cancel" onclick="cancelMove()" disabled>Cancel Move</button>
   <span class="nav-status" id="nav-status"></span>
@@ -1352,6 +1370,103 @@ def sequencer_macros():
 
 
 # ---------------------------------------------------------------------------
+# Recorder — teach-mode record-and-playback for CNC + Arduino state
+# ---------------------------------------------------------------------------
+@app.route("/recorder")
+def recorder():
+    return RECORDER_HTML
+
+
+@app.route("/recorder/state")
+def recorder_state():
+    """Current full machine snapshot, in the same schema used per step."""
+    with cnc_status_lock:
+        cnc_st = dict(cached_cnc_status)
+    with arduino_status_lock:
+        ard_st = dict(cached_arduino_status)
+    cnc_block = None
+    if cnc_st.get("connected"):
+        wpos = cnc_st.get("wpos") or {}
+        cnc_block = {
+            "x": round(float(wpos.get("x", 0)), 3),
+            "y": round(float(wpos.get("y", 0)), 3),
+            "a": round(float(wpos.get("z", 0)), 3),
+        }
+    motors_block = None
+    if ard_st.get("connected"):
+        pos = ard_st.get("positions") or {}
+        motors_block = {
+            "x": int(pos.get("x", 0)),
+            "z": int(pos.get("z", 0)),
+            "byj1": int(pos.get("byj1", 0)),
+            "byj2": int(pos.get("byj2", 0)),
+        }
+    servo = arduino.current_servo_angle if arduino.connected else None
+    dc = dict(arduino.current_dc_state) if arduino.connected else None
+    return jsonify({
+        "cnc": cnc_block,
+        "motors": motors_block,
+        "servo": servo,
+        "dc": dc,
+        "cnc_state": cnc_st.get("state", "--"),
+        "cnc_connected": bool(cnc_st.get("connected")),
+        "arduino_connected": bool(ard_st.get("connected")),
+    })
+
+
+def _safe_recording_name(name):
+    return "".join(c for c in name if c.isalnum() or c in " _-").strip()
+
+
+@app.route("/recorder/save", methods=["POST"])
+def recorder_save():
+    body = request.get_json(force=True)
+    name = body.get("name", "").strip()
+    steps = body.get("steps", [])
+    if not name:
+        return jsonify({"error": "Name required"}), 400
+    safe = _safe_recording_name(name)
+    if not safe:
+        return jsonify({"error": "Invalid name"}), 400
+    path = os.path.join("data/recordings", safe + ".json")
+    with open(path, "w") as f:
+        json.dump({"name": name, "steps": steps}, f, indent=2)
+    return jsonify({"ok": True})
+
+
+@app.route("/recorder/list")
+def recorder_list():
+    names = []
+    for fname in sorted(os.listdir("data/recordings")):
+        if fname.endswith(".json"):
+            names.append(fname[:-5])
+    return jsonify(names)
+
+
+@app.route("/recorder/load")
+def recorder_load():
+    name = request.args.get("name", "").strip()
+    safe = _safe_recording_name(name)
+    path = os.path.join("data/recordings", safe + ".json")
+    if not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+
+@app.route("/recorder/delete", methods=["POST"])
+def recorder_delete():
+    body = request.get_json(force=True)
+    name = body.get("name", "").strip()
+    safe = _safe_recording_name(name)
+    path = os.path.join("data/recordings", safe + ".json")
+    if not os.path.exists(path):
+        return jsonify({"error": "Not found"}), 404
+    os.remove(path)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Sequencer HTML
 # ---------------------------------------------------------------------------
 SEQUENCER_HTML = r"""<!DOCTYPE html>
@@ -1578,6 +1693,7 @@ SEQUENCER_HTML = r"""<!DOCTYPE html>
   </div>
   <div class="nav-links">
     <a href="/">&larr; Capture</a>
+    <a href="/recorder">Recorder</a>
     <a href="/navigator">Navigator</a>
   </div>
 </header>
@@ -2703,6 +2819,590 @@ loadPoints().then(() => loadMacros());
 initCanvasSortable();
 pollStatus();
 applyTransform();
+</script>
+</body></html>"""
+
+
+# ---------------------------------------------------------------------------
+# Recorder HTML
+# ---------------------------------------------------------------------------
+RECORDER_HTML = r"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sequence Recorder</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.6/Sortable.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: #0b1121; color: #e2e8f0; display: flex; flex-direction: column;
+         font-size: 14px; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: #0f172a; }
+  ::-webkit-scrollbar-thumb { background: #334155; border-radius: 4px; }
+
+  header { height: 48px; background: #0f172a; border-bottom: 1px solid #1e293b; display: flex;
+           align-items: center; padding: 0 16px; flex-shrink: 0; gap: 16px; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header .nav-links { margin-left: auto; display: flex; gap: 12px; }
+  header .nav-links a { color: #8ab4f8; text-decoration: none; font-weight: 500; }
+  header .nav-links a:hover { text-decoration: underline; }
+  .conn-pill { padding: 2px 8px; border-radius: 10px; font-size: 12px; font-weight: 500; }
+  .conn-pill.ok { background: #064e3b; color: #6ee7b7; }
+  .conn-pill.bad { background: #4c1d24; color: #fca5a5; }
+
+  main { display: grid; grid-template-columns: 380px 1fr; gap: 0; flex: 1; min-height: 0; }
+
+  aside.live { background: #0f172a; border-right: 1px solid #1e293b; padding: 16px;
+               overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  aside.live h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+                  color: #94a3b8; margin-bottom: 4px; }
+  .panel { background: #111a2e; border: 1px solid #1e293b; border-radius: 6px; padding: 12px; }
+  .panel .label { font-size: 11px; text-transform: uppercase; color: #64748b; letter-spacing: 0.5px; }
+  .panel .value { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+                  font-size: 14px; color: #e2e8f0; margin-top: 2px; }
+  .panel .row { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; }
+  .panel .row + .row { border-top: 1px dashed #1e293b; }
+
+  .record-btn { background: #dc2626; color: white; border: none; border-radius: 8px;
+                padding: 14px; font-size: 16px; font-weight: 600; cursor: pointer;
+                box-shadow: 0 4px 12px rgba(220, 38, 38, 0.35); }
+  .record-btn:hover { background: #b91c1c; }
+  .record-btn:disabled { background: #334155; box-shadow: none; cursor: not-allowed; }
+  .record-btn .kbd { background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px;
+                     font-size: 11px; margin-left: 8px; }
+
+  section.steps { padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+             background: #0f172a; padding: 10px 12px; border-radius: 6px;
+             border: 1px solid #1e293b; }
+  .toolbar input[type="text"] { background: #0b1121; color: #e2e8f0; border: 1px solid #1e293b;
+                                padding: 6px 10px; border-radius: 4px; font-size: 13px; min-width: 160px; }
+  .toolbar select { background: #0b1121; color: #e2e8f0; border: 1px solid #1e293b;
+                    padding: 6px 8px; border-radius: 4px; font-size: 13px; }
+  .toolbar button { background: #1e293b; color: #e2e8f0; border: 1px solid #334155;
+                    padding: 6px 12px; border-radius: 4px; font-size: 13px; cursor: pointer; font-weight: 500; }
+  .toolbar button:hover { background: #334155; }
+  .toolbar button.primary { background: #1d4ed8; border-color: #1d4ed8; }
+  .toolbar button.primary:hover { background: #1e40af; }
+  .toolbar button.warn { background: #92400e; border-color: #92400e; }
+  .toolbar button.warn:hover { background: #b45309; }
+  .toolbar button.danger { background: #7f1d1d; border-color: #7f1d1d; }
+  .toolbar button.danger:hover { background: #991b1b; }
+  .toolbar button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .toolbar .sep { width: 1px; height: 24px; background: #1e293b; margin: 0 4px; }
+
+  .step-list { display: flex; flex-direction: column; gap: 6px; }
+  .step { display: grid; grid-template-columns: 28px 24px 1fr auto; gap: 10px;
+          background: #111a2e; border: 1px solid #1e293b; border-radius: 6px;
+          padding: 10px 12px; align-items: center; }
+  .step.current { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb; }
+  .step.done { opacity: 0.55; }
+  .step .idx { font-family: 'JetBrains Mono', monospace; color: #64748b; font-size: 12px; }
+  .step .handle { color: #475569; cursor: grab; font-size: 16px; user-select: none; }
+  .step .handle:active { cursor: grabbing; }
+  .step .body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .step .label { font-size: 13px; color: #e2e8f0; font-weight: 500; }
+  .step .label input { background: transparent; border: none; color: #e2e8f0; font-size: 13px;
+                       width: 100%; outline: none; font-weight: 500; }
+  .step .label input:focus { background: #0b1121; border: 1px solid #334155;
+                             border-radius: 3px; padding: 1px 4px; }
+  .step .summary { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: #94a3b8;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .step .actions { display: flex; gap: 4px; }
+  .step .actions button { background: #1e293b; border: 1px solid #334155; color: #cbd5e1;
+                          padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+  .step .actions button:hover { background: #334155; }
+  .step .actions button.danger { color: #fca5a5; }
+  .step .actions button.danger:hover { background: #7f1d1d; }
+
+  .empty { color: #64748b; text-align: center; padding: 40px 20px; font-style: italic;
+           border: 1px dashed #1e293b; border-radius: 6px; }
+
+  .status-line { background: #0f172a; padding: 10px 12px; border-radius: 6px;
+                 border: 1px solid #1e293b; font-size: 12px; color: #94a3b8;
+                 font-family: 'JetBrains Mono', monospace; }
+  .status-line.error { color: #fca5a5; border-color: #7f1d1d; }
+  .status-line.ok { color: #6ee7b7; border-color: #064e3b; }
+</style>
+</head><body>
+
+<header>
+  <h1>Sequence Recorder</h1>
+  <span class="conn-pill" id="cnc-pill">CNC</span>
+  <span class="conn-pill" id="ard-pill">Arduino</span>
+  <div class="nav-links">
+    <a href="/">&larr; Capture</a>
+    <a href="/navigator">Navigator</a>
+    <a href="/sequencer">Block Sequencer</a>
+  </div>
+</header>
+
+<main>
+  <aside class="live">
+    <h2>Live State</h2>
+    <div class="panel" id="cnc-panel">
+      <div class="row"><span class="label">CNC State</span><span class="value" id="live-cnc-state">--</span></div>
+      <div class="row"><span class="label">X</span><span class="value" id="live-x">--</span></div>
+      <div class="row"><span class="label">Y</span><span class="value" id="live-y">--</span></div>
+      <div class="row"><span class="label">A (rot)</span><span class="value" id="live-a">--</span></div>
+    </div>
+    <div class="panel" id="ard-panel">
+      <div class="row"><span class="label">Stepper X</span><span class="value" id="live-mx">--</span></div>
+      <div class="row"><span class="label">Stepper Z</span><span class="value" id="live-mz">--</span></div>
+      <div class="row"><span class="label">BYJ1</span><span class="value" id="live-mb1">--</span></div>
+      <div class="row"><span class="label">BYJ2</span><span class="value" id="live-mb2">--</span></div>
+      <div class="row"><span class="label">Servo</span><span class="value" id="live-servo">--</span></div>
+      <div class="row"><span class="label">DC</span><span class="value" id="live-dc">--</span></div>
+    </div>
+    <button class="record-btn" id="btn-record" onclick="recordSnapshot()">
+      Record Snapshot <span class="kbd">R</span>
+    </button>
+    <div class="status-line" id="record-status">Ready. Press R to record.</div>
+  </aside>
+
+  <section class="steps">
+    <div class="toolbar">
+      <input type="text" id="name-input" placeholder="Sequence name" />
+      <button class="primary" onclick="saveSequence()">Save</button>
+      <select id="load-select"><option value="">Load saved...</option></select>
+      <button onclick="loadSelected()">Load</button>
+      <button class="danger" onclick="deleteSelected()">Delete</button>
+      <span class="sep"></span>
+      <button class="primary" id="btn-play" onclick="play()">&#9658; Play</button>
+      <button id="btn-step" onclick="stepOnce()">Step</button>
+      <button class="warn" id="btn-stop" onclick="stop()" disabled>Stop</button>
+      <span class="sep"></span>
+      <button class="danger" onclick="clearAll()">Clear All</button>
+    </div>
+    <div class="status-line" id="play-status">Idle.</div>
+    <div id="step-container">
+      <div class="empty" id="empty-msg">No steps yet. Jog the machine, then press <b>R</b> (or the red button) to record a snapshot.</div>
+      <div class="step-list" id="step-list"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+// =========================================================================
+// State
+// =========================================================================
+let steps = [];                 // [{label, cnc, motors, servo, dc, timestamp}]
+let liveSnapshot = null;        // latest /recorder/state response
+let stopFlag = false;
+let playing = false;
+let currentStepIdx = -1;
+
+const STORAGE_KEY = 'recorder_steps_v1';
+
+function saveLocal() { localStorage.setItem(STORAGE_KEY, JSON.stringify(steps)); }
+function loadLocal() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) steps = JSON.parse(raw);
+  } catch (e) { steps = []; }
+}
+
+// =========================================================================
+// Live state polling
+// =========================================================================
+async function pollState() {
+  try {
+    const r = await fetch('/recorder/state');
+    const d = await r.json();
+    liveSnapshot = d;
+    renderLive(d);
+  } catch (e) { /* ignore */ }
+}
+
+function renderLive(d) {
+  document.getElementById('live-cnc-state').textContent = d.cnc_state || '--';
+  const cncPill = document.getElementById('cnc-pill');
+  cncPill.textContent = 'CNC ' + (d.cnc_connected ? 'connected' : 'offline');
+  cncPill.className = 'conn-pill ' + (d.cnc_connected ? 'ok' : 'bad');
+  const ardPill = document.getElementById('ard-pill');
+  ardPill.textContent = 'Arduino ' + (d.arduino_connected ? 'connected' : 'offline');
+  ardPill.className = 'conn-pill ' + (d.arduino_connected ? 'ok' : 'bad');
+
+  if (d.cnc) {
+    document.getElementById('live-x').textContent = d.cnc.x.toFixed(3);
+    document.getElementById('live-y').textContent = d.cnc.y.toFixed(3);
+    document.getElementById('live-a').textContent = d.cnc.a.toFixed(3) + '°';
+  } else {
+    document.getElementById('live-x').textContent = '--';
+    document.getElementById('live-y').textContent = '--';
+    document.getElementById('live-a').textContent = '--';
+  }
+  if (d.motors) {
+    document.getElementById('live-mx').textContent = d.motors.x;
+    document.getElementById('live-mz').textContent = d.motors.z;
+    document.getElementById('live-mb1').textContent = d.motors.byj1;
+    document.getElementById('live-mb2').textContent = d.motors.byj2;
+  } else {
+    document.getElementById('live-mx').textContent = '--';
+    document.getElementById('live-mz').textContent = '--';
+    document.getElementById('live-mb1').textContent = '--';
+    document.getElementById('live-mb2').textContent = '--';
+  }
+  document.getElementById('live-servo').textContent = (d.servo == null ? 'unset' : d.servo + '°');
+  if (d.dc) {
+    document.getElementById('live-dc').textContent = d.dc.action + (d.dc.action === 'stop' ? '' : ' @' + d.dc.speed);
+  } else {
+    document.getElementById('live-dc').textContent = '--';
+  }
+}
+
+setInterval(pollState, 250);
+pollState();
+
+// =========================================================================
+// Recording
+// =========================================================================
+function recordSnapshot() {
+  if (!liveSnapshot) {
+    flashStatus('record-status', 'No live state yet.', 'error');
+    return;
+  }
+  const snap = liveSnapshot;
+  const step = {
+    label: '',
+    cnc: snap.cnc ? { x: snap.cnc.x, y: snap.cnc.y, a: snap.cnc.a } : null,
+    motors: snap.motors ? { ...snap.motors } : null,
+    servo: snap.servo,
+    dc: snap.dc ? { ...snap.dc } : null,
+    timestamp: new Date().toISOString(),
+  };
+  steps.push(step);
+  saveLocal();
+  render();
+  flashStatus('record-status', 'Recorded step #' + steps.length + '.', 'ok');
+}
+
+function deleteStep(idx) {
+  steps.splice(idx, 1);
+  saveLocal();
+  render();
+}
+
+function overwriteStep(idx) {
+  if (!liveSnapshot) return;
+  const old = steps[idx];
+  steps[idx] = {
+    label: old.label || '',
+    cnc: liveSnapshot.cnc ? { ...liveSnapshot.cnc } : null,
+    motors: liveSnapshot.motors ? { ...liveSnapshot.motors } : null,
+    servo: liveSnapshot.servo,
+    dc: liveSnapshot.dc ? { ...liveSnapshot.dc } : null,
+    timestamp: new Date().toISOString(),
+  };
+  saveLocal();
+  render();
+}
+
+function setLabel(idx, text) {
+  steps[idx].label = text;
+  saveLocal();
+}
+
+function clearAll() {
+  if (!confirm('Clear all ' + steps.length + ' steps?')) return;
+  steps = [];
+  currentStepIdx = -1;
+  saveLocal();
+  render();
+}
+
+// =========================================================================
+// Rendering
+// =========================================================================
+function summarize(s) {
+  const parts = [];
+  if (s.cnc) parts.push('CNC(' + s.cnc.x.toFixed(1) + ',' + s.cnc.y.toFixed(1) + ',' + s.cnc.a.toFixed(1) + ')');
+  if (s.motors) parts.push('X=' + s.motors.x + ' Z=' + s.motors.z + ' B1=' + s.motors.byj1 + ' B2=' + s.motors.byj2);
+  if (s.servo != null) parts.push('servo=' + s.servo);
+  if (s.dc && s.dc.action) parts.push('dc=' + s.dc.action + (s.dc.action === 'stop' ? '' : '@' + s.dc.speed));
+  return parts.join(' | ');
+}
+
+let sortableInst = null;
+
+function render() {
+  const list = document.getElementById('step-list');
+  const empty = document.getElementById('empty-msg');
+  empty.style.display = steps.length === 0 ? '' : 'none';
+  list.innerHTML = '';
+  steps.forEach((s, i) => {
+    const row = document.createElement('div');
+    row.className = 'step';
+    if (i === currentStepIdx) row.classList.add('current');
+    row.dataset.idx = i;
+    row.innerHTML =
+      '<span class="idx">#' + (i + 1) + '</span>' +
+      '<span class="handle" title="Drag to reorder">☰</span>' +
+      '<div class="body">' +
+        '<div class="label"><input type="text" placeholder="Step description..." value="' +
+            (s.label || '').replace(/"/g, '&quot;') + '" /></div>' +
+        '<div class="summary">' + summarize(s) + '</div>' +
+      '</div>' +
+      '<div class="actions">' +
+        '<button title="Overwrite with current live state">Re-snap</button>' +
+        '<button class="danger" title="Delete this step">&times;</button>' +
+      '</div>';
+    const inp = row.querySelector('input');
+    inp.addEventListener('input', () => setLabel(i, inp.value));
+    const [btnResnap, btnDel] = row.querySelectorAll('.actions button');
+    btnResnap.addEventListener('click', () => overwriteStep(i));
+    btnDel.addEventListener('click', () => deleteStep(i));
+    list.appendChild(row);
+  });
+
+  if (sortableInst) sortableInst.destroy();
+  sortableInst = Sortable.create(list, {
+    handle: '.handle',
+    animation: 150,
+    onEnd: (evt) => {
+      if (evt.oldIndex === evt.newIndex) return;
+      const [moved] = steps.splice(evt.oldIndex, 1);
+      steps.splice(evt.newIndex, 0, moved);
+      saveLocal();
+      render();
+    },
+  });
+}
+
+function flashStatus(elId, text, cls) {
+  const el = document.getElementById(elId);
+  el.textContent = text;
+  el.className = 'status-line ' + (cls || '');
+}
+
+// =========================================================================
+// Playback primitives (adapted from Block Sequencer)
+// =========================================================================
+async function waitForCncIdle(timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000;
+  await new Promise(r => setTimeout(r, 300));
+  while (Date.now() < deadline) {
+    if (stopFlag) return;
+    const r = await fetch('/cnc/status');
+    const d = await r.json();
+    if (d.state === 'Idle') return;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  throw new Error('Timeout waiting for CNC idle');
+}
+
+async function waitForArduinoMotorStop(motor, timeoutSec) {
+  const deadline = Date.now() + timeoutSec * 1000;
+  await new Promise(r => setTimeout(r, 400));
+  let lastPos = null;
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    if (stopFlag) return;
+    const r = await fetch('/arduino/status');
+    const d = await r.json();
+    const pos = d.positions ? d.positions[motor] : null;
+    if (pos !== null && pos === lastPos) {
+      stableCount++;
+      if (stableCount >= 3) return;
+    } else {
+      stableCount = 0;
+    }
+    lastPos = pos;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  throw new Error('Timeout waiting for ' + motor);
+}
+
+async function cncGotoAndWait(target) {
+  const r = await fetch('/cnc/jog', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ x: target.x, y: target.y, a: target.a, feedrate: 1000 }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error('CNC: ' + d.error);
+  await waitForCncIdle(180);
+}
+
+async function arduinoMoveAbsAndWait(motor, target) {
+  const r = await fetch('/arduino/move_abs', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ motor, target }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error(motor + ': ' + d.error);
+  await waitForArduinoMotorStop(motor, 180);
+}
+
+async function setServo(angle) {
+  const r = await fetch('/arduino/servo', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ angle }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error('servo: ' + d.error);
+  await new Promise(r => setTimeout(r, 400));
+}
+
+async function setDc(dc) {
+  if (!dc || !dc.action) return;
+  const r = await fetch('/arduino/dc', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action: dc.action, speed: dc.speed || 0 }),
+  });
+  const d = await r.json();
+  if (d.error) throw new Error('dc: ' + d.error);
+}
+
+async function playStep(s) {
+  const tasks = [];
+  const cncConn = liveSnapshot && liveSnapshot.cnc_connected;
+  const ardConn = liveSnapshot && liveSnapshot.arduino_connected;
+  if (s.cnc && cncConn) tasks.push(cncGotoAndWait(s.cnc));
+  if (s.motors && ardConn) {
+    tasks.push(arduinoMoveAbsAndWait('x', s.motors.x));
+    tasks.push(arduinoMoveAbsAndWait('z', s.motors.z));
+    tasks.push(arduinoMoveAbsAndWait('byj1', s.motors.byj1));
+    tasks.push(arduinoMoveAbsAndWait('byj2', s.motors.byj2));
+  }
+  if (s.servo != null && ardConn) tasks.push(setServo(s.servo));
+  if (s.dc && s.dc.action && ardConn) tasks.push(setDc(s.dc));
+  await Promise.all(tasks);
+}
+
+// =========================================================================
+// Playback controls
+// =========================================================================
+async function runFrom(startIdx, onlyOne) {
+  if (playing) return;
+  if (steps.length === 0) {
+    flashStatus('play-status', 'No steps to play.', 'error');
+    return;
+  }
+  playing = true;
+  stopFlag = false;
+  document.getElementById('btn-stop').disabled = false;
+  document.getElementById('btn-play').disabled = true;
+  document.getElementById('btn-step').disabled = true;
+  document.getElementById('btn-record').disabled = true;
+  try {
+    for (let i = startIdx; i < steps.length; i++) {
+      if (stopFlag) { flashStatus('play-status', 'Stopped at step ' + (i + 1) + '.', 'error'); break; }
+      currentStepIdx = i;
+      render();
+      flashStatus('play-status', 'Running step ' + (i + 1) + ' / ' + steps.length + '...', '');
+      await playStep(steps[i]);
+      if (onlyOne) { flashStatus('play-status', 'Stepped to ' + (i + 1) + '.', 'ok'); break; }
+    }
+    if (!stopFlag && !onlyOne) {
+      flashStatus('play-status', 'Done. ' + steps.length + ' steps complete.', 'ok');
+    }
+  } catch (e) {
+    flashStatus('play-status', 'Error: ' + e.message, 'error');
+  } finally {
+    playing = false;
+    stopFlag = false;
+    document.getElementById('btn-stop').disabled = true;
+    document.getElementById('btn-play').disabled = false;
+    document.getElementById('btn-step').disabled = false;
+    document.getElementById('btn-record').disabled = false;
+  }
+}
+
+function play() { runFrom(0, false); }
+
+function stepOnce() {
+  const next = currentStepIdx + 1;
+  if (next >= steps.length) {
+    flashStatus('play-status', 'Already at end. Reset by pressing Play or clicking a step.', 'error');
+    return;
+  }
+  runFrom(next, true);
+}
+
+async function stop() {
+  stopFlag = true;
+  try { await fetch('/cnc/jog/cancel', { method: 'POST' }); } catch (e) {}
+  flashStatus('play-status', 'Stop requested...', 'error');
+}
+
+// =========================================================================
+// Save / Load
+// =========================================================================
+async function saveSequence() {
+  const name = document.getElementById('name-input').value.trim();
+  if (!name) { alert('Enter a name first.'); return; }
+  const r = await fetch('/recorder/save', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name, steps }),
+  });
+  const d = await r.json();
+  if (d.error) { alert('Save failed: ' + d.error); return; }
+  flashStatus('play-status', 'Saved as "' + name + '".', 'ok');
+  refreshSavedList();
+}
+
+async function refreshSavedList() {
+  const sel = document.getElementById('load-select');
+  const current = sel.value;
+  try {
+    const r = await fetch('/recorder/list');
+    const names = await r.json();
+    sel.innerHTML = '<option value="">Load saved...</option>';
+    names.forEach(n => {
+      const opt = document.createElement('option');
+      opt.value = n; opt.textContent = n;
+      sel.appendChild(opt);
+    });
+    if (names.includes(current)) sel.value = current;
+  } catch (e) {}
+}
+
+async function loadSelected() {
+  const name = document.getElementById('load-select').value;
+  if (!name) return;
+  const r = await fetch('/recorder/load?name=' + encodeURIComponent(name));
+  const d = await r.json();
+  if (d.error) { alert('Load failed: ' + d.error); return; }
+  steps = d.steps || [];
+  currentStepIdx = -1;
+  document.getElementById('name-input').value = d.name || name;
+  saveLocal();
+  render();
+  flashStatus('play-status', 'Loaded "' + name + '" (' + steps.length + ' steps).', 'ok');
+}
+
+async function deleteSelected() {
+  const name = document.getElementById('load-select').value;
+  if (!name) return;
+  if (!confirm('Delete saved sequence "' + name + '"?')) return;
+  const r = await fetch('/recorder/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ name }),
+  });
+  const d = await r.json();
+  if (d.error) { alert('Delete failed: ' + d.error); return; }
+  refreshSavedList();
+}
+
+// =========================================================================
+// Keyboard
+// =========================================================================
+document.addEventListener('keydown', (e) => {
+  if (document.activeElement && document.activeElement.tagName === 'INPUT') return;
+  if (e.key === 'r' || e.key === 'R') {
+    if (!playing) { e.preventDefault(); recordSnapshot(); }
+  }
+});
+
+// =========================================================================
+// Init
+// =========================================================================
+loadLocal();
+render();
+refreshSavedList();
 </script>
 </body></html>"""
 

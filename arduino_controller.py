@@ -20,6 +20,11 @@ class ArduinoController:
     def __init__(self):
         self._serial = None
         self._lock = threading.Lock()
+        # Firmware reports stepper positions via `P`, but servo angle and DC
+        # state are write-only — track them host-side so the recorder can
+        # snapshot a full machine state.
+        self.current_servo_angle = None
+        self.current_dc_state = {"action": "stop", "speed": 0}
 
     # ------------------------------------------------------------------
     # Auto-detect
@@ -164,21 +169,50 @@ class ArduinoController:
     # ------------------------------------------------------------------
     def set_servo(self, angle):
         angle = max(0, min(180, int(angle)))
-        return self.send_command(f"O{angle}")
+        resp = self.send_command(f"O{angle}")
+        self.current_servo_angle = angle
+        return resp
 
     # ------------------------------------------------------------------
     # DC motor
     # ------------------------------------------------------------------
     def dc_forward(self, speed):
         speed = max(0, min(100, int(speed)))
-        return self.send_command(f"F{speed}")
+        resp = self.send_command(f"F{speed}")
+        self.current_dc_state = {"action": "forward", "speed": speed}
+        return resp
 
     def dc_reverse(self, speed):
         speed = max(0, min(100, int(speed)))
-        return self.send_command(f"G{speed}")
+        resp = self.send_command(f"G{speed}")
+        self.current_dc_state = {"action": "reverse", "speed": speed}
+        return resp
 
     def dc_stop(self):
-        return self.send_command("S")
+        resp = self.send_command("S")
+        self.current_dc_state = {"action": "stop", "speed": 0}
+        return resp
+
+    # ------------------------------------------------------------------
+    # Absolute stepper targeting (for sequence playback)
+    # ------------------------------------------------------------------
+    def move_to_abs(self, motor, target_steps):
+        """Move a stepper to an absolute step count by computing the delta.
+
+        Firmware accepts only relative moves, so we query the current position
+        and send the difference. Returns the firmware response, or None on
+        error / unknown motor.
+        """
+        positions = self.query_positions()
+        if positions is None:
+            return None
+        motor = motor.lower()
+        if motor not in positions:
+            return None
+        delta = int(target_steps) - int(positions[motor])
+        dispatch = {"x": self.move_x, "z": self.move_z,
+                    "byj1": self.move_byj1, "byj2": self.move_byj2}
+        return dispatch[motor](delta)
 
     # ------------------------------------------------------------------
     # Reset
