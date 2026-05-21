@@ -102,30 +102,35 @@ class ArduinoController:
     # ------------------------------------------------------------------
     # Core command
     # ------------------------------------------------------------------
+    def _send_inline(self, ser, cmd):
+        """Send a command and read one line response. Caller must hold _lock.
+
+        Drains the RX buffer before writing so any stale, unread response from
+        a prior aborted transaction can't be misread as this command's reply.
+        """
+        try:
+            ser.reset_input_buffer()
+            ser.write((cmd + "\n").encode())
+            resp = ser.readline().decode("ascii", errors="replace").strip()
+            return resp if resp else None
+        except (OSError, Exception) as e:
+            print(f"[Arduino] Command '{cmd}' failed: {e}")
+            return None
+
     def send_command(self, cmd):
         """Send a command string and read one line response. Returns string or None."""
         with self._lock:
             ser = self._serial
             if ser is None:
                 return None
-            try:
-                ser.write((cmd + "\n").encode())
-                resp = ser.readline().decode("ascii", errors="replace").strip()
-                return resp if resp else None
-            except (OSError, Exception) as e:
-                print(f"[Arduino] Command '{cmd}' failed: {e}")
-                return None
+            return self._send_inline(ser, cmd)
 
     # ------------------------------------------------------------------
     # Position query
     # ------------------------------------------------------------------
-    def query_positions(self):
-        """Send 'P' and parse position response.
-
-        Expected format: "X: N | Z: N | BYJ1: N | BYJ2: N"
-        Returns dict {x, z, byj1, byj2} or None.
-        """
-        resp = self.send_command("P")
+    @staticmethod
+    def _parse_positions(resp):
+        """Parse a 'X: N | Z: N | BYJ1: N | BYJ2: N' line. Returns dict or None."""
         if resp is None:
             return None
         try:
@@ -137,17 +142,23 @@ class ArduinoController:
                 key, val = part.split(":", 1)
                 key = key.strip().lower()
                 val = int(val.strip())
-                if key == "x":
-                    positions["x"] = val
-                elif key == "z":
-                    positions["z"] = val
-                elif key == "byj1":
-                    positions["byj1"] = val
-                elif key == "byj2":
-                    positions["byj2"] = val
+                if key in ("x", "z", "byj1", "byj2"):
+                    positions[key] = val
             return positions if positions else None
         except (ValueError, IndexError):
             return None
+
+    def query_positions(self):
+        """Send 'P' and parse position response.
+
+        Expected format: "X: N | Z: N | BYJ1: N | BYJ2: N"
+        Returns dict {x, z, byj1, byj2} or None.
+        """
+        with self._lock:
+            ser = self._serial
+            if ser is None:
+                return None
+            return self._parse_positions(self._send_inline(ser, "P"))
 
     # ------------------------------------------------------------------
     # Stepper motors
@@ -196,23 +207,61 @@ class ArduinoController:
     # ------------------------------------------------------------------
     # Absolute stepper targeting (for sequence playback)
     # ------------------------------------------------------------------
+    _MOTOR_CMD = {"x": "X", "z": "Z", "byj1": "B", "byj2": "J"}
+
     def move_to_abs(self, motor, target_steps):
-        """Move a stepper to an absolute step count by computing the delta.
+        """Move a stepper to an absolute step count. Atomic under _lock.
 
         Firmware accepts only relative moves, so we query the current position
-        and send the difference. Returns the firmware response, or None on
-        error / unknown motor.
+        and send the difference — but the whole P-then-move sequence runs
+        under one lock acquisition so another thread can't change the
+        position between read and write. Returns firmware response, "no-op"
+        if already at target, or None on error.
         """
-        positions = self.query_positions()
-        if positions is None:
-            return None
         motor = motor.lower()
-        if motor not in positions:
+        if motor not in self._MOTOR_CMD:
             return None
-        delta = int(target_steps) - int(positions[motor])
-        dispatch = {"x": self.move_x, "z": self.move_z,
-                    "byj1": self.move_byj1, "byj2": self.move_byj2}
-        return dispatch[motor](delta)
+        with self._lock:
+            ser = self._serial
+            if ser is None:
+                return None
+            positions = self._parse_positions(self._send_inline(ser, "P"))
+            if positions is None or motor not in positions:
+                return None
+            delta = int(target_steps) - int(positions[motor])
+            if delta == 0:
+                return "no-op"
+            return self._send_inline(ser, f"{self._MOTOR_CMD[motor]}{delta}")
+
+    def move_all_to_abs(self, targets):
+        """Atomic multi-motor absolute move.
+
+        `targets` is a dict with any subset of {x, z, byj1, byj2} → int steps.
+        One P query, then one move per non-zero delta, all under one lock.
+        Returns {motor: response_or_"no-op"} or None if the P query failed.
+        """
+        with self._lock:
+            ser = self._serial
+            if ser is None:
+                return None
+            positions = self._parse_positions(self._send_inline(ser, "P"))
+            if positions is None:
+                return None
+            results = {}
+            for motor, cmd_char in self._MOTOR_CMD.items():
+                if motor not in targets:
+                    continue
+                try:
+                    target = int(targets[motor])
+                except (TypeError, ValueError):
+                    results[motor] = None
+                    continue
+                delta = target - int(positions.get(motor, 0))
+                if delta == 0:
+                    results[motor] = "no-op"
+                else:
+                    results[motor] = self._send_inline(ser, f"{cmd_char}{delta}")
+            return results
 
     # ------------------------------------------------------------------
     # Reset

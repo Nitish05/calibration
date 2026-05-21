@@ -330,6 +330,26 @@ def arduino_move_abs():
     return jsonify({"ok": True, "response": resp})
 
 
+@app.route("/arduino/move_abs_all", methods=["POST"])
+def arduino_move_abs_all():
+    if not arduino.connected:
+        return jsonify({"error": "Arduino not connected"}), 503
+    body = request.get_json(force=True)
+    targets = {}
+    for motor in ("x", "z", "byj1", "byj2"):
+        if motor in body:
+            try:
+                targets[motor] = int(body[motor])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"Bad target for {motor}"}), 400
+    if not targets:
+        return jsonify({"error": "No motor targets supplied"}), 400
+    results = arduino.move_all_to_abs(targets)
+    if results is None:
+        return jsonify({"error": "Could not read current positions"}), 500
+    return jsonify({"ok": True, "results": results})
+
+
 @app.route("/arduino/servo", methods=["POST"])
 def arduino_servo():
     if not arduino.connected:
@@ -3324,14 +3344,25 @@ async function cncGotoAndWait(target) {
   await waitForCncIdle(180);
 }
 
-async function arduinoMoveAbsAndWait(motor, target) {
-  const r = await fetch('/arduino/move_abs', {
+async function arduinoMoveAllAbsAndWait(motors) {
+  // Single batched call avoids four parallel /arduino/move_abs requests
+  // racing on the shared serial port. Server runs them atomically; we then
+  // wait for every motor (positions are cached so these polls don't add
+  // serial load).
+  const r = await fetch('/arduino/move_abs_all', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ motor, target }),
+    body: JSON.stringify({
+      x: motors.x, z: motors.z, byj1: motors.byj1, byj2: motors.byj2,
+    }),
   });
   const d = await r.json();
-  if (d.error) throw new Error(motor + ': ' + d.error);
-  await waitForArduinoMotorStop(motor, 180);
+  if (d.error) throw new Error('arduino: ' + d.error);
+  await Promise.all([
+    waitForArduinoMotorStop('x', 180),
+    waitForArduinoMotorStop('z', 180),
+    waitForArduinoMotorStop('byj1', 180),
+    waitForArduinoMotorStop('byj2', 180),
+  ]);
 }
 
 async function setServo(angle) {
@@ -3360,10 +3391,7 @@ async function playStep(s) {
   const ardConn = liveSnapshot && liveSnapshot.arduino_connected;
   if (s.cnc && cncConn) tasks.push(cncGotoAndWait(s.cnc));
   if (s.motors && ardConn) {
-    tasks.push(arduinoMoveAbsAndWait('x', s.motors.x));
-    tasks.push(arduinoMoveAbsAndWait('z', s.motors.z));
-    tasks.push(arduinoMoveAbsAndWait('byj1', s.motors.byj1));
-    tasks.push(arduinoMoveAbsAndWait('byj2', s.motors.byj2));
+    tasks.push(arduinoMoveAllAbsAndWait(s.motors));
   }
   if (s.servo != null && ardConn) tasks.push(setServo(s.servo));
   if (s.dc && s.dc.action && ardConn) tasks.push(setDc(s.dc));
